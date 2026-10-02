@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtual environment
+.venv/
+
+# Environment variables
+.env
+
+# Local databases / generated data
+data/lancedb/
+data/processed/
+
+# Documents
+*.pdf
+
+# VS Code
+.vscode/
+
+# OS
+Thumbs.db
+.DS_Store
