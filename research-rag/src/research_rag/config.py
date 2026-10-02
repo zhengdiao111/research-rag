@@ -514,3 +514,119 @@ if HYBRID_RRF_K <= 0:
     raise ValueError(
         "HYBRID_RRF_K must be greater than 0."
     )
+
+# =========================================================
+# Retrieval refinement — Milestone 5B
+# =========================================================
+
+
+RERANK_ENABLED = (
+    os.getenv(
+        "RERANK_ENABLED",
+        "true",
+    )
+    .strip()
+    .lower()
+    in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+)
+
+
+RETRIEVAL_CANDIDATE_MULTIPLIER = int(
+    os.getenv(
+        "RETRIEVAL_CANDIDATE_MULTIPLIER",
+        "3",
+    )
+)
+
+
+RERANK_CAPTION_WEIGHT = float(
+    os.getenv(
+        "RERANK_CAPTION_WEIGHT",
+        "0.80",
+    )
+)
+
+
+RERANK_METHODS_WEIGHT = float(
+    os.getenv(
+        "RERANK_METHODS_WEIGHT",
+        "0.97",
+    )
+)
+
+
+RERANK_SUPPLEMENTARY_WEIGHT = float(
+    os.getenv(
+        "RERANK_SUPPLEMENTARY_WEIGHT",
+        "0.92",
+    )
+)
+
+
+RERANK_MAX_CAPTIONS = int(
+    os.getenv(
+        "RERANK_MAX_CAPTIONS",
+        "2",
+    )
+)
+
+
+# ---------------------------------------------------------
+# Validation
+# ---------------------------------------------------------
+
+
+if RETRIEVAL_CANDIDATE_MULTIPLIER < 1:
+
+    raise ValueError(
+        "RETRIEVAL_CANDIDATE_MULTIPLIER "
+        "must be at least 1."
+    )
+
+
+if not (
+    0.0
+    < RERANK_CAPTION_WEIGHT
+    <= 1.0
+):
+
+    raise ValueError(
+        "RERANK_CAPTION_WEIGHT must be "
+        "greater than 0 and <= 1."
+    )
+
+
+if not (
+    0.0
+    < RERANK_METHODS_WEIGHT
+    <= 1.0
+):
+
+    raise ValueError(
+        "RERANK_METHODS_WEIGHT must be "
+        "greater than 0 and <= 1."
+    )
+
+
+if not (
+    0.0
+    < RERANK_SUPPLEMENTARY_WEIGHT
+    <= 1.0
+):
+
+    raise ValueError(
+        "RERANK_SUPPLEMENTARY_WEIGHT must be "
+        "greater than 0 and <= 1."
+    )
+
+
+if RERANK_MAX_CAPTIONS < 0:
+
+    raise ValueError(
+        "RERANK_MAX_CAPTIONS cannot be negative."
+    )
