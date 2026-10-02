@@ -314,3 +314,156 @@ if not SEARCHABLE_CHUNK_TYPES:
     raise ValueError(
         "SEARCHABLE_CHUNK_TYPES cannot be empty."
     )
+
+
+# ---------------------------------------------------------
+# LLM
+# ---------------------------------------------------------
+
+
+LLM_MODEL = os.getenv(
+    "LLM_MODEL",
+    "qwen3.5:4b",
+)
+
+
+LLM_TIMEOUT_SECONDS = float(
+    os.getenv(
+        "LLM_TIMEOUT_SECONDS",
+        "300",
+    )
+)
+
+
+LLM_TEMPERATURE = float(
+    os.getenv(
+        "LLM_TEMPERATURE",
+        "0.2",
+    )
+)
+
+
+LLM_MAX_OUTPUT_TOKENS = int(
+    os.getenv(
+        "LLM_MAX_OUTPUT_TOKENS",
+        "1600",
+    )
+)
+
+
+LLM_THINK = get_bool_env(
+    "LLM_THINK",
+    False,
+)
+
+
+# ---------------------------------------------------------
+# RAG synthesis
+# ---------------------------------------------------------
+
+
+RAG_RETRIEVAL_K = int(
+    os.getenv(
+        "RAG_RETRIEVAL_K",
+        "12",
+    )
+)
+
+
+RAG_FINAL_K = int(
+    os.getenv(
+        "RAG_FINAL_K",
+        "8",
+    )
+)
+
+
+RAG_EVIDENCE_BUDGET = int(
+    os.getenv(
+        "RAG_EVIDENCE_BUDGET",
+        "9000",
+    )
+)
+
+
+RAG_CITATION_VERIFY = get_bool_env(
+    "RAG_CITATION_VERIFY",
+    True,
+)
+
+
+# ---------------------------------------------------------
+# Validation
+# ---------------------------------------------------------
+
+
+if LLM_TIMEOUT_SECONDS <= 0:
+
+    raise ValueError(
+        "LLM_TIMEOUT_SECONDS must be greater than 0."
+    )
+
+
+if not (
+    0.0
+    <= LLM_TEMPERATURE
+    <= 2.0
+):
+
+    raise ValueError(
+        "LLM_TEMPERATURE must be between 0 and 2."
+    )
+
+
+if LLM_MAX_OUTPUT_TOKENS <= 0:
+
+    raise ValueError(
+        "LLM_MAX_OUTPUT_TOKENS must be greater than 0."
+    )
+
+
+if RAG_RETRIEVAL_K <= 0:
+
+    raise ValueError(
+        "RAG_RETRIEVAL_K must be greater than 0."
+    )
+
+
+if RAG_FINAL_K <= 0:
+
+    raise ValueError(
+        "RAG_FINAL_K must be greater than 0."
+    )
+
+
+if (
+    RAG_FINAL_K
+    > RAG_RETRIEVAL_K
+):
+
+    raise ValueError(
+        "RAG_FINAL_K cannot exceed "
+        "RAG_RETRIEVAL_K."
+    )
+
+
+if RAG_EVIDENCE_BUDGET <= 0:
+
+    raise ValueError(
+        "RAG_EVIDENCE_BUDGET must be greater than 0."
+    )
+
+    # ---------------------------------------------------------
+# RAG grounding safeguards
+# ---------------------------------------------------------
+
+RAG_SUFFICIENCY_CHECK = get_bool_env(
+    "RAG_SUFFICIENCY_CHECK",
+    True,
+)
+
+
+RAG_CITATION_REPAIR = get_bool_env(
+    "RAG_CITATION_REPAIR",
+    True,
+)
