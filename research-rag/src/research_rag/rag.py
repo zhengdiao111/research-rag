@@ -17,8 +17,8 @@ from .config import (
     RAG_SUFFICIENCY_CHECK,
 )
 
-from .database import (
-    semantic_search,
+from .retrieval import (
+    retrieve,
 )
 
 from .embeddings import (
@@ -1741,12 +1741,13 @@ def answer_question(
     # =====================================================
 
     retrieved = (
-        semantic_search(
-
+        retrieve(
+            question=(
+                question
+            ),
             query_vector=(
                 query_vector
             ),
-
             top_k=(
                 retrieval_k
             ),

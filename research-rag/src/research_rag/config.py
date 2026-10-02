@@ -467,3 +467,50 @@ RAG_CITATION_REPAIR = get_bool_env(
     "RAG_CITATION_REPAIR",
     True,
 )
+
+# ---------------------------------------------------------
+# Hybrid retrieval
+# ---------------------------------------------------------
+
+RETRIEVAL_MODE = os.getenv(
+    "RETRIEVAL_MODE",
+    "hybrid",
+).strip().lower()
+
+
+FTS_COLUMN = os.getenv(
+    "FTS_COLUMN",
+    "text",
+)
+
+
+VECTOR_COLUMN = os.getenv(
+    "VECTOR_COLUMN",
+    "vector",
+)
+
+
+HYBRID_RRF_K = int(
+    os.getenv(
+        "HYBRID_RRF_K",
+        "60",
+    )
+)
+
+
+if RETRIEVAL_MODE not in {
+    "vector",
+    "hybrid",
+}:
+
+    raise ValueError(
+        "RETRIEVAL_MODE must be either "
+        "'vector' or 'hybrid'."
+    )
+
+
+if HYBRID_RRF_K <= 0:
+
+    raise ValueError(
+        "HYBRID_RRF_K must be greater than 0."
+    )
