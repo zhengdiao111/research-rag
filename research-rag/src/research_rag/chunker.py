@@ -34,11 +34,10 @@ def count_tokens(
     text: str,
 ) -> int:
     """
-    Count approximate tokens used for chunk sizing.
+    Approximate token count used only for chunk sizing.
 
-    This tokenizer is used only to keep chunk sizes
-    consistent. The eventual embedding model may use
-    a different tokenizer internally.
+    The embedding model uses its own tokenizer, so this
+    should not be treated as the model's true token count.
     """
 
     if not text:
@@ -56,7 +55,7 @@ def decode_tokens(
     tokens: list[int],
 ) -> str:
     """
-    Decode tokenizer IDs back into text.
+    Decode chunking-token IDs back to text.
     """
 
     return _ENCODER.decode(
@@ -65,14 +64,47 @@ def decode_tokens(
 
 
 # =========================================================
-# Internal data structures
+# Data structures
 # =========================================================
+
+
+@dataclass
+class MarkdownUnit:
+    """
+    One parsed Markdown unit.
+
+    kind:
+        "heading" or "paragraph"
+
+    heading_level:
+        1-6 for Markdown headings.
+        None for paragraphs.
+    """
+
+    kind: str
+
+    text: str
+
+    heading_level: int | None = None
+
+
+@dataclass
+class HeadingContext:
+    """
+    Active heading in the document hierarchy.
+    """
+
+    level: int
+
+    section: str
+
+    chunk_type: str
 
 
 @dataclass
 class TextBlock:
     """
-    Intermediate paragraph / heading representation.
+    Intermediate semantic block.
     """
 
     text: str
@@ -87,11 +119,13 @@ class TextBlock:
 
     is_heading: bool = False
 
+    heading_level: int | None = None
+
 
 @dataclass
 class Segment:
     """
-    A paragraph-sized piece ready for chunk assembly.
+    Paragraph-sized unit ready for chunk assembly.
     """
 
     text: str
@@ -108,37 +142,7 @@ class Segment:
 @dataclass
 class ResearchChunk:
     """
-    Final research-RAG chunk.
-
-    Attributes
-    ----------
-    chunk_id:
-        Stable deterministic ID for this particular chunk.
-
-    document_id:
-        Stable identifier derived from the source PDF hash.
-
-    filename:
-        Original PDF filename.
-
-    page_start / page_end:
-        Physical PDF page range represented by the chunk.
-
-    section:
-        Current article section or heading.
-
-    chunk_type:
-        Semantic category such as body, methods,
-        references, caption, metadata, etc.
-
-    text:
-        Text that will eventually be embedded.
-
-    token_count:
-        Approximate token count used by the chunker.
-
-    source_sha256:
-        Full source PDF hash.
+    Final RAG chunk.
     """
 
     chunk_id: str
@@ -176,7 +180,7 @@ def clean_heading(
     text: str,
 ) -> str:
     """
-    Remove common Markdown formatting from a heading.
+    Remove Markdown formatting from a heading.
     """
 
     text = text.strip()
@@ -213,6 +217,11 @@ def clean_heading(
         "",
     )
 
+    text = text.replace(
+        "~~",
+        "",
+    )
+
     return text.strip()
 
 
@@ -225,23 +234,17 @@ def normalize_text(
     text: str,
 ) -> str:
     """
-    Perform conservative cleanup suitable for scientific text.
+    Conservative cleanup for scientific text.
 
-    Deliberately avoids spelling correction because automatic
-    correction could damage:
-
-    - gene names
-    - protein names
-    - abbreviations
-    - chemical names
-    - equations
-    - identifiers
+    Does not perform spelling correction because that could
+    damage gene names, protein names, chemical names,
+    identifiers, mathematical notation, etc.
     """
 
     if not text:
         return ""
 
-    # Unicode replacement character from imperfect PDF text.
+    # Unicode replacement character.
     text = text.replace(
         "\ufffd",
         "",
@@ -259,7 +262,7 @@ def normalize_text(
         " ",
     )
 
-    # Normalize Windows line endings.
+    # Normalize line endings.
     text = text.replace(
         "\r\n",
         "\n",
@@ -270,14 +273,14 @@ def normalize_text(
         "\n",
     )
 
-    # Collapse repeated spaces and tabs.
+    # Repeated spaces / tabs.
     text = re.sub(
         r"[ \t]+",
         " ",
         text,
     )
 
-    # Avoid excessive blank lines.
+    # Excessive blank lines.
     text = re.sub(
         r"\n{3,}",
         "\n\n",
@@ -288,116 +291,398 @@ def normalize_text(
 
 
 # =========================================================
-# Section classification
+# Heading classification
 # =========================================================
+
+
+def normalize_heading_for_classification(
+    heading: str,
+) -> str:
+    """
+    Normalize heading text before classification.
+    """
+
+    normalized = (
+        heading
+        .lower()
+        .strip()
+    )
+
+    normalized = re.sub(
+        r"[^a-z0-9\s&:/-]",
+        "",
+        normalized,
+    )
+
+    normalized = re.sub(
+        r"\s+",
+        " ",
+        normalized,
+    )
+
+    return normalized.strip()
 
 
 def classify_heading(
     heading: str,
 ) -> str:
     """
-    Classify common scientific-paper section headings.
+    Directly classify a heading.
+
+    Returning "body" means the heading itself does not
+    explicitly identify a special section. Hierarchical
+    inheritance is handled separately.
     """
 
-    normalized = heading.lower().strip()
-
-    normalized = re.sub(
-        r"[^a-z0-9\s&/-]",
-        "",
-        normalized,
+    normalized = (
+        normalize_heading_for_classification(
+            heading
+        )
     )
 
-    # References
-    if any(
-        phrase in normalized
-        for phrase in (
-            "references",
-            "bibliography",
-            "literature cited",
-        )
-    ):
+
+    # =====================================================
+    # References / bibliography
+    # =====================================================
+
+    if normalized in {
+        "references",
+        "reference",
+        "bibliography",
+        "works cited",
+        "literature cited",
+    }:
+
         return "references"
 
-    # Acknowledgments
-    if any(
-        phrase in normalized
-        for phrase in (
-            "acknowledgment",
-            "acknowledgement",
-            "acknowledgments",
-            "acknowledgements",
-        )
+
+    if normalized.startswith(
+        "references and"
     ):
+
+        return "references"
+
+
+    # =====================================================
+    # Further reading
+    # =====================================================
+
+    if normalized in {
+        "further reading",
+        "further readings",
+        "recommended reading",
+        "recommended readings",
+        "suggested reading",
+        "suggested readings",
+        "additional reading",
+        "additional readings",
+        "further reading and listening",
+    }:
+
+        return "further_reading"
+
+
+    # =====================================================
+    # Acknowledgments
+    # =====================================================
+
+    if normalized in {
+        "acknowledgment",
+        "acknowledgments",
+        "acknowledgement",
+        "acknowledgements",
+    }:
+
         return "acknowledgments"
 
+
+    # =====================================================
     # Abstract / summary
+    # =====================================================
+
     if normalized in {
         "abstract",
         "summary",
     }:
+
         return "abstract"
 
+
+    # =====================================================
     # Introduction
-    if any(
-        phrase in normalized
-        for phrase in (
-            "introduction",
-            "background",
-        )
-    ):
+    # =====================================================
+
+    if normalized in {
+        "introduction",
+        "background",
+    }:
+
         return "introduction"
 
+
+    # =====================================================
     # Methods
-    if any(
-        phrase in normalized
-        for phrase in (
-            "materials and methods",
-            "methods",
-            "methodology",
-            "experimental procedures",
-            "experimental methods",
-        )
-    ):
+    # =====================================================
+
+    if normalized in {
+        "methods",
+        "methodology",
+        "materials and methods",
+        "methods and materials",
+        "experimental methods",
+        "experimental procedures",
+        "experimental section",
+    }:
+
         return "methods"
 
+
+    # =====================================================
     # Results
-    if normalized.startswith(
-        "result"
-    ):
-        return "results"
+    # =====================================================
 
-    # Discussion
-    if normalized.startswith(
-        "discussion"
-    ):
-        return "discussion"
-
-    # Conclusions
-    if any(
-        phrase in normalized
-        for phrase in (
-            "conclusion",
-            "conclusions",
-            "concluding remarks",
+    if (
+        normalized == "results"
+        or normalized.startswith(
+            "results "
         )
     ):
+
+        return "results"
+
+
+    # =====================================================
+    # Discussion
+    # =====================================================
+
+    if (
+        normalized == "discussion"
+        or normalized.startswith(
+            "discussion "
+        )
+    ):
+
+        return "discussion"
+
+
+    # =====================================================
+    # Conclusions
+    # =====================================================
+
+    if normalized in {
+        "conclusion",
+        "conclusions",
+        "concluding remarks",
+        "concluding discussion",
+    }:
+
         return "conclusion"
 
-    # Supplementary material
+
+    # =====================================================
+    # Supplementary / appendix
+    # =====================================================
+
     if any(
         phrase in normalized
         for phrase in (
-            "supplementary",
+            "supplementary material",
+            "supplemental material",
+            "supplementary information",
             "supporting information",
         )
     ):
+
         return "supplementary"
+
+
+    if (
+        normalized == "appendix"
+        or normalized == "appendices"
+        or normalized.startswith(
+            "appendix "
+        )
+    ):
+
+        return "supplementary"
+
+
+    # =====================================================
+    # Book front matter
+    # =====================================================
+
+    if normalized in {
+        "contents",
+        "table of contents",
+        "preface",
+        "foreword",
+        "prologue",
+        "introduction to the book",
+        "about the author",
+        "about the authors",
+        "contributors",
+        "list of contributors",
+        "dedication",
+        "title page",
+        "copyright page",
+    }:
+
+        return "frontmatter"
+
+
+    # =====================================================
+    # Index
+    # =====================================================
+
+    if normalized in {
+        "index",
+        "subject index",
+        "author index",
+        "name index",
+        "general index",
+    }:
+
+        return "index"
+
+
+    # =====================================================
+    # Notes / endnotes
+    # =====================================================
+
+    if normalized in {
+        "notes",
+        "endnotes",
+        "chapter notes",
+        "notes to chapters",
+    }:
+
+        return "notes"
+
+
+    # =====================================================
+    # Glossary
+    # =====================================================
+
+    if normalized in {
+        "glossary",
+        "glossary of terms",
+    }:
+
+        return "glossary"
+
+
+    # =====================================================
+    # Ordinary chapter headings
+    # =====================================================
+    #
+    # Chapters remain normal semantic body content.
+
+    if re.match(
+        r"^chapter\b",
+        normalized,
+    ):
+
+        return "body"
+
+
+    # =====================================================
+    # Default
+    # =====================================================
 
     return "body"
 
 
 # =========================================================
-# Metadata detection
+# Hierarchical section inheritance
+# =========================================================
+
+
+INHERITABLE_PARENT_TYPES = {
+    "abstract",
+    "introduction",
+    "methods",
+    "results",
+    "discussion",
+    "conclusion",
+    "supplementary",
+    "references",
+    "acknowledgments",
+    "index",
+    "notes",
+    "glossary",
+    "further_reading",
+}
+
+
+def resolve_heading_type(
+    heading: str,
+    heading_level: int,
+    heading_stack: list[HeadingContext],
+) -> str:
+    """
+    Determine the semantic type for a heading.
+
+    Example
+    -------
+
+    # Index
+        -> index
+
+    ## bacteria
+        direct classification = body
+        parent = index
+        final type = index
+
+    This also improves normal papers:
+
+    ## Results
+        -> results
+
+    ### Transcription increases after stimulation
+        direct classification = body
+        parent = results
+        final type = results
+    """
+
+    direct_type = (
+        classify_heading(
+            heading
+        )
+    )
+
+
+    # An explicitly recognized heading always wins.
+
+    if direct_type != "body":
+
+        return direct_type
+
+
+    # Search the active ancestors from nearest to farthest.
+
+    for parent in reversed(
+        heading_stack
+    ):
+
+        if parent.level >= heading_level:
+            continue
+
+
+        if (
+            parent.chunk_type
+            in INHERITABLE_PARENT_TYPES
+        ):
+
+            return (
+                parent.chunk_type
+            )
+
+
+    return "body"
+
+
+# =========================================================
+# Metadata / publisher boilerplate
 # =========================================================
 
 
@@ -406,11 +691,15 @@ _METADATA_SIGNALS = (
     "permissions",
     "terms of service",
     "issn",
+    "isbn",
     "copyright ©",
     "copyright (c)",
     "all rights reserved",
     "reprints and permissions",
     "downloaded from http",
+    "library of congress control number",
+    "printed in china",
+    "printed in the united states",
 )
 
 
@@ -421,7 +710,9 @@ def looks_like_metadata(
     Identify obvious publisher boilerplate.
     """
 
-    lowered = text.lower()
+    lowered = (
+        text.lower()
+    )
 
     return any(
         signal in lowered
@@ -433,21 +724,24 @@ def page_is_mostly_metadata(
     paragraphs: list[str],
 ) -> bool:
     """
-    Detect publisher-only pages such as the final Science
-    permissions / DOI page.
+    Detect publisher-only pages.
 
-    Requires multiple metadata signals so normal article pages
-    are not accidentally removed.
+    Multiple metadata signals are required to reduce false
+    positives.
     """
 
     if not paragraphs:
         return False
 
+
     hits = sum(
         1
         for text in paragraphs
-        if looks_like_metadata(text)
+        if looks_like_metadata(
+            text
+        )
     )
+
 
     return (
         hits >= 2
@@ -459,35 +753,36 @@ def page_is_mostly_metadata(
 
 
 # =========================================================
-# Page parsing
+# Markdown page parsing
 # =========================================================
 
 
 def split_markdown_units(
     text: str,
-) -> list[tuple[str, str]]:
+) -> list[MarkdownUnit]:
     """
-    Split page Markdown into heading and paragraph units.
-
-    Returns
-    -------
-    list of:
-        ("heading", text)
-        ("paragraph", text)
+    Split Markdown into headings and paragraphs while
+    preserving heading level.
     """
 
     text = normalize_text(
         text
     )
 
+
     if not text:
+
         return []
 
+
     units: list[
-        tuple[str, str]
+        MarkdownUnit
     ] = []
 
-    paragraph_lines: list[str] = []
+
+    paragraph_lines: list[
+        str
+    ] = []
 
 
     def flush_paragraph() -> None:
@@ -495,31 +790,41 @@ def split_markdown_units(
         if not paragraph_lines:
             return
 
+
         paragraph = " ".join(
             line.strip()
             for line in paragraph_lines
             if line.strip()
         )
 
-        paragraph = normalize_text(
-            paragraph
+
+        paragraph = (
+            normalize_text(
+                paragraph
+            )
         )
+
 
         if paragraph:
 
             units.append(
-                (
-                    "paragraph",
-                    paragraph,
+                MarkdownUnit(
+                    kind="paragraph",
+                    text=paragraph,
+                    heading_level=None,
                 )
             )
+
 
         paragraph_lines.clear()
 
 
     for line in text.splitlines():
 
-        stripped = line.strip()
+        stripped = (
+            line.strip()
+        )
+
 
         if not stripped:
 
@@ -528,26 +833,47 @@ def split_markdown_units(
             continue
 
 
-        match = HEADING_PATTERN.match(
-            stripped
+        match = (
+            HEADING_PATTERN.match(
+                stripped
+            )
         )
+
 
         if match:
 
             flush_paragraph()
 
-            heading = clean_heading(
-                stripped
+
+            markdown_marks = (
+                match.group(1)
             )
+
+
+            heading_level = len(
+                markdown_marks
+            )
+
+
+            heading = (
+                clean_heading(
+                    match.group(2)
+                )
+            )
+
 
             if heading:
 
                 units.append(
-                    (
-                        "heading",
-                        heading,
+                    MarkdownUnit(
+                        kind="heading",
+                        text=heading,
+                        heading_level=(
+                            heading_level
+                        ),
                     )
                 )
+
 
             continue
 
@@ -559,7 +885,44 @@ def split_markdown_units(
 
     flush_paragraph()
 
+
     return units
+
+
+# =========================================================
+# Heading stack helpers
+# =========================================================
+
+
+def update_heading_stack(
+    heading_stack: list[HeadingContext],
+    heading: str,
+    level: int,
+    chunk_type: str,
+) -> None:
+    """
+    Update active Markdown heading hierarchy.
+
+    Any existing heading at the same or deeper level is
+    closed when a new heading appears.
+    """
+
+    while (
+        heading_stack
+        and heading_stack[-1].level
+        >= level
+    ):
+
+        heading_stack.pop()
+
+
+    heading_stack.append(
+        HeadingContext(
+            level=level,
+            section=heading,
+            chunk_type=chunk_type,
+        )
+    )
 
 
 # =========================================================
@@ -571,30 +934,49 @@ def document_to_blocks(
     document: ParsedDocument,
 ) -> list[TextBlock]:
     """
-    Convert parsed pages into semantic text blocks.
+    Convert parsed PDF pages into hierarchical semantic
+    text blocks.
     """
 
-    blocks: list[TextBlock] = []
+    blocks: list[
+        TextBlock
+    ] = []
+
 
     current_section = (
         document.title
         or "Main text"
     )
 
-    current_type = "body"
+
+    current_type = (
+        "body"
+    )
+
+
+    heading_stack: list[
+        HeadingContext
+    ] = []
 
 
     for page in document.pages:
 
-        units = split_markdown_units(
-            page.text
+        units = (
+            split_markdown_units(
+                page.text
+            )
         )
 
 
         paragraphs = [
-            text
-            for kind, text in units
-            if kind == "paragraph"
+            unit.text
+
+            for unit in units
+
+            if (
+                unit.kind
+                == "paragraph"
+            )
         ]
 
 
@@ -605,27 +987,83 @@ def document_to_blocks(
         )
 
 
-        for kind, unit_text in units:
+        for unit in units:
 
-            if kind == "heading":
+            # =================================================
+            # Heading
+            # =================================================
 
-                current_section = (
-                    clean_heading(
-                        unit_text
-                    )
-                    or current_section
+            if unit.kind == "heading":
+
+                heading_level = (
+                    unit.heading_level
+                    or 1
                 )
 
+
+                # ---------------------------------------------
+                # Remove same-level and deeper headings BEFORE
+                # determining inheritance.
+                # ---------------------------------------------
+
+                while (
+                    heading_stack
+                    and heading_stack[-1].level
+                    >= heading_level
+                ):
+
+                    heading_stack.pop()
+
+
+                heading_type = (
+                    resolve_heading_type(
+                        heading=(
+                            unit.text
+                        ),
+
+                        heading_level=(
+                            heading_level
+                        ),
+
+                        heading_stack=(
+                            heading_stack
+                        ),
+                    )
+                )
+
+
+                current_section = (
+                    unit.text
+                )
+
+
                 current_type = (
-                    classify_heading(
-                        current_section
+                    heading_type
+                )
+
+
+                heading_stack.append(
+                    HeadingContext(
+                        level=(
+                            heading_level
+                        ),
+
+                        section=(
+                            current_section
+                        ),
+
+                        chunk_type=(
+                            current_type
+                        ),
                     )
                 )
 
 
                 blocks.append(
                     TextBlock(
-                        text=current_section,
+                        text=(
+                            current_section
+                        ),
 
                         page_start=(
                             page.page_number
@@ -644,11 +1082,20 @@ def document_to_blocks(
                         ),
 
                         is_heading=True,
+
+                        heading_level=(
+                            heading_level
+                        ),
                     )
                 )
 
+
                 continue
 
+
+            # =================================================
+            # Paragraph
+            # =================================================
 
             block_type = (
                 current_type
@@ -657,18 +1104,25 @@ def document_to_blocks(
 
             if mostly_metadata:
 
-                block_type = "metadata"
+                block_type = (
+                    "metadata"
+                )
+
 
             elif looks_like_metadata(
-                unit_text
+                unit.text
             ):
 
-                block_type = "metadata"
+                block_type = (
+                    "metadata"
+                )
 
 
             blocks.append(
                 TextBlock(
-                    text=unit_text,
+                    text=(
+                        unit.text
+                    ),
 
                     page_start=(
                         page.page_number
@@ -687,22 +1141,28 @@ def document_to_blocks(
                     ),
 
                     is_heading=False,
+
+                    heading_level=None,
                 )
             )
 
 
-        # ---------------------------------------------
-        # Captions preserved separately by parser.py
-        # ---------------------------------------------
+        # =================================================
+        # Captions
+        # =================================================
 
         for caption in page.captions:
 
-            caption = normalize_text(
-                caption
+            caption = (
+                normalize_text(
+                    caption
+                )
             )
+
 
             if not caption:
                 continue
+
 
             blocks.append(
                 TextBlock(
@@ -720,9 +1180,13 @@ def document_to_blocks(
                         "Figure / Table Caption"
                     ),
 
-                    chunk_type="caption",
+                    chunk_type=(
+                        "caption"
+                    ),
 
                     is_heading=False,
+
+                    heading_level=None,
                 )
             )
 
@@ -739,14 +1203,18 @@ def starts_with_lowercase(
     text: str,
 ) -> bool:
     """
-    Return True when the first alphabetic character is lowercase.
+    Return True when the first alphabetic character is
+    lowercase.
     """
 
     for char in text:
 
         if char.isalpha():
 
-            return char.islower()
+            return (
+                char.islower()
+            )
+
 
     return False
 
@@ -755,52 +1223,53 @@ def repair_interrupted_layout(
     blocks: list[TextBlock],
 ) -> list[TextBlock]:
     """
-    Repair one common multi-column PDF extraction artifact.
+    Repair the multi-column interruption pattern previously
+    observed in Science PDFs.
 
-    Example layout:
+    Example:
 
-        ... observed phenom-
+        observed phenom-
 
         ## Defects program tissue shapes
 
-        [short sidebar paragraph]
+        [sidebar]
 
-        enon is driven by mechanical forces.
-
-    The heading/sidebar is preserved as a separate ``sidebar``
-    block while:
-
-        phenom- + enon
+        enon is driven...
 
     becomes:
 
-        phenomenon
+        observed phenomenon is driven...
 
-    This repair is intentionally conservative. It requires:
-
-    - an unfinished hyphenated word
-    - immediately followed by a heading
-    - followed by a short paragraph
-    - followed by lowercase continuation text
-    - all on the same PDF page
+    while preserving the sidebar separately.
     """
 
     blocks = list(
         blocks
     )
 
+
     i = 0
 
 
-    while i <= len(blocks) - 4:
+    while i <= len(
+        blocks
+    ) - 4:
 
-        first = blocks[i]
+        first = (
+            blocks[i]
+        )
 
-        heading = blocks[i + 1]
+        heading = (
+            blocks[i + 1]
+        )
 
-        sidebar_body = blocks[i + 2]
+        sidebar_body = (
+            blocks[i + 2]
+        )
 
-        continuation = blocks[i + 3]
+        continuation = (
+            blocks[i + 3]
+        )
 
 
         same_page = (
@@ -857,13 +1326,17 @@ def repair_interrupted_layout(
         )
 
 
-        # ---------------------------------------------
-        # Join interrupted word
-        # ---------------------------------------------
+        # -------------------------------------------------
+        # Repair interrupted word
+        # -------------------------------------------------
 
-        left = first.text.rstrip()
+        left = (
+            first.text.rstrip()
+        )
 
-        right = continuation.text.lstrip()
+        right = (
+            continuation.text.lstrip()
+        )
 
 
         joined_text = (
@@ -875,7 +1348,9 @@ def repair_interrupted_layout(
         merged = replace(
             first,
 
-            text=joined_text,
+            text=(
+                joined_text
+            ),
 
             page_end=(
                 continuation.page_end
@@ -883,12 +1358,11 @@ def repair_interrupted_layout(
         )
 
 
-        # ---------------------------------------------
-        # Preserve sidebar as its own retrieval object
-        # ---------------------------------------------
+        # -------------------------------------------------
+        # Preserve sidebar
+        # -------------------------------------------------
 
         sidebar = TextBlock(
-
             text=(
                 f"{heading.text}\n\n"
                 f"{sidebar_body.text}"
@@ -906,34 +1380,46 @@ def repair_interrupted_layout(
                 sidebar_section
             ),
 
-            chunk_type="sidebar",
+            chunk_type=(
+                "sidebar"
+            ),
 
             is_heading=False,
+
+            heading_level=None,
         )
 
 
-        # ---------------------------------------------
-        # The false sidebar heading may have changed the
-        # section assigned to following article paragraphs.
-        #
-        # Restore their previous section until the next
-        # real heading.
-        # ---------------------------------------------
+        # -------------------------------------------------
+        # Restore original section to immediately following
+        # prose if the false sidebar heading changed it.
+        # -------------------------------------------------
 
-        j = i + 4
+        j = (
+            i + 4
+        )
 
-        while j < len(blocks):
 
-            block = blocks[j]
+        while j < len(
+            blocks
+        ):
+
+            block = (
+                blocks[j]
+            )
+
 
             if block.is_heading:
                 break
+
 
             if (
                 block.page_start
                 != first.page_start
             ):
+
                 break
+
 
             if (
                 block.section
@@ -951,6 +1437,7 @@ def repair_interrupted_layout(
                         original_type
                     ),
                 )
+
 
             j += 1
 
@@ -970,7 +1457,7 @@ def repair_interrupted_layout(
 
 
 # =========================================================
-# Remove heading markers
+# Remove standalone headings
 # =========================================================
 
 
@@ -978,13 +1465,15 @@ def remove_heading_blocks(
     blocks: Iterable[TextBlock],
 ) -> list[TextBlock]:
     """
-    Headings are stored as metadata on their paragraphs rather
-    than embedded as standalone chunks.
+    Heading information is retained as metadata, so headings
+    do not need independent chunks.
     """
 
     return [
         block
+
         for block in blocks
+
         if not block.is_heading
     ]
 
@@ -1003,17 +1492,22 @@ def split_long_block(
     block: TextBlock,
 ) -> list[Segment]:
     """
-    Split one very long paragraph.
+    Split a long paragraph into smaller semantic segments.
 
-    Sentence boundaries are preferred.
-
-    Token-level slicing is used only as the final fallback.
+    Preference:
+        sentence boundaries
+        then token-level fallback
     """
 
-    text = block.text.strip()
+    text = (
+        block.text.strip()
+    )
 
-    token_count = count_tokens(
-        text
+
+    token_count = (
+        count_tokens(
+            text
+        )
     )
 
 
@@ -1044,22 +1538,31 @@ def split_long_block(
 
     sentences = [
         sentence.strip()
-        for sentence in _SENTENCE_SPLIT.split(
+
+        for sentence
+        in _SENTENCE_SPLIT.split(
             text
         )
+
         if sentence.strip()
     ]
 
 
-    # If sentence parsing did not help, fall back to
-    # token slicing.
+    # =====================================================
+    # Token-level fallback
+    # =====================================================
 
-    if len(sentences) <= 1:
+    if len(
+        sentences
+    ) <= 1:
 
-        tokens = _ENCODER.encode(
-            text,
-            disallowed_special=(),
+        tokens = (
+            _ENCODER.encode(
+                text,
+                disallowed_special=(),
+            )
         )
+
 
         pieces: list[
             Segment
@@ -1069,16 +1572,26 @@ def split_long_block(
         start = 0
 
 
-        while start < len(tokens):
+        while start < len(
+            tokens
+        ):
 
             stop = min(
-                start + CHUNK_TARGET,
+                start
+                + CHUNK_TARGET,
+
                 len(tokens),
             )
 
-            piece = decode_tokens(
-                tokens[start:stop]
-            ).strip()
+
+            piece = (
+                decode_tokens(
+                    tokens[
+                        start:stop
+                    ]
+                )
+                .strip()
+            )
 
 
             if piece:
@@ -1106,12 +1619,17 @@ def split_long_block(
                 )
 
 
-            if stop >= len(tokens):
+            if stop >= len(
+                tokens
+            ):
+
                 break
 
 
             start = max(
-                stop - CHUNK_OVERLAP,
+                stop
+                - CHUNK_OVERLAP,
+
                 start + 1,
             )
 
@@ -1119,9 +1637,19 @@ def split_long_block(
         return pieces
 
 
-    pieces: list[Segment] = []
+    # =====================================================
+    # Sentence-aware split
+    # =====================================================
 
-    current: list[str] = []
+    pieces: list[
+        Segment
+    ] = []
+
+
+    current: list[
+        str
+    ] = []
+
 
     current_tokens = 0
 
@@ -1137,6 +1665,7 @@ def split_long_block(
 
         if (
             current
+
             and (
                 current_tokens
                 + sentence_tokens
@@ -1144,9 +1673,12 @@ def split_long_block(
             )
         ):
 
-            piece = " ".join(
-                current
-            ).strip()
+            piece = (
+                " ".join(
+                    current
+                )
+                .strip()
+            )
 
 
             pieces.append(
@@ -1177,38 +1709,20 @@ def split_long_block(
             current_tokens = 0
 
 
-        # A single enormous sentence still needs token slicing.
+        # -------------------------------------------------
+        # Single huge sentence
+        # -------------------------------------------------
 
         if (
             not current
+
             and sentence_tokens
             > CHUNK_MAX
         ):
 
-            temporary = TextBlock(
-                text=sentence,
-
-                page_start=(
-                    block.page_start
-                ),
-
-                page_end=(
-                    block.page_end
-                ),
-
-                section=(
-                    block.section
-                ),
-
-                chunk_type=(
-                    block.chunk_type
-                ),
-            )
-
-
-            sentence_token_ids = (
+            encoded = (
                 _ENCODER.encode(
-                    temporary.text,
+                    sentence,
                     disallowed_special=(),
                 )
             )
@@ -1218,20 +1732,27 @@ def split_long_block(
 
 
             while start < len(
-                sentence_token_ids
+                encoded
             ):
 
                 stop = min(
-                    start + CHUNK_TARGET,
-                    len(sentence_token_ids),
+                    start
+                    + CHUNK_TARGET,
+
+                    len(
+                        encoded
+                    ),
                 )
 
 
-                piece = decode_tokens(
-                    sentence_token_ids[
-                        start:stop
-                    ]
-                ).strip()
+                piece = (
+                    decode_tokens(
+                        encoded[
+                            start:stop
+                        ]
+                    )
+                    .strip()
+                )
 
 
                 if piece:
@@ -1260,13 +1781,16 @@ def split_long_block(
 
 
                 if stop >= len(
-                    sentence_token_ids
+                    encoded
                 ):
+
                     break
 
 
                 start = max(
-                    stop - CHUNK_OVERLAP,
+                    stop
+                    - CHUNK_OVERLAP,
+
                     start + 1,
                 )
 
@@ -1278,6 +1802,7 @@ def split_long_block(
             sentence
         )
 
+
         current_tokens += (
             sentence_tokens
         )
@@ -1285,14 +1810,14 @@ def split_long_block(
 
     if current:
 
-        piece = " ".join(
-            current
-        ).strip()
-
-
         pieces.append(
             Segment(
-                text=piece,
+                text=(
+                    " ".join(
+                        current
+                    )
+                    .strip()
+                ),
 
                 page_start=(
                     block.page_start
@@ -1324,9 +1849,6 @@ def split_long_block(
 def blocks_to_segments(
     blocks: list[TextBlock],
 ) -> list[Segment]:
-    """
-    Convert semantic blocks into chunk-sized segments.
-    """
 
     segments: list[
         Segment
@@ -1337,6 +1859,7 @@ def blocks_to_segments(
 
         if not block.text.strip():
             continue
+
 
         segments.extend(
             split_long_block(
@@ -1349,7 +1872,7 @@ def blocks_to_segments(
 
 
 # =========================================================
-# Overlap helper
+# Overlap
 # =========================================================
 
 
@@ -1357,24 +1880,19 @@ def overlap_tail(
     segments: list[Segment],
     token_budget: int,
 ) -> list[Segment]:
-    """
-    Preserve approximately ``token_budget`` tokens from the end
-    of the previous chunk.
-
-    Prefers whole paragraphs. If the final paragraph alone is
-    too large, only its token tail is used.
-    """
 
     if (
         not segments
         or token_budget <= 0
     ):
+
         return []
 
 
     selected: list[
         Segment
     ] = []
+
 
     total = 0
 
@@ -1383,13 +1901,15 @@ def overlap_tail(
         segments
     ):
 
-        tokens = count_tokens(
-            segment.text
+        token_count = (
+            count_tokens(
+                segment.text
+            )
         )
 
 
         if (
-            total + tokens
+            total + token_count
             <= token_budget
         ):
 
@@ -1397,13 +1917,16 @@ def overlap_tail(
                 segment
             )
 
-            total += tokens
+            total += (
+                token_count
+            )
 
             continue
 
 
         remaining = (
-            token_budget - total
+            token_budget
+            - total
         )
 
 
@@ -1417,9 +1940,14 @@ def overlap_tail(
             )
 
 
-            tail_text = decode_tokens(
-                encoded[-remaining:]
-            ).strip()
+            tail_text = (
+                decode_tokens(
+                    encoded[
+                        -remaining:
+                    ]
+                )
+                .strip()
+            )
 
 
             if tail_text:
@@ -1464,36 +1992,31 @@ def can_combine(
     current: list[Segment],
     candidate: Segment,
 ) -> bool:
-    """
-    Decide whether a candidate may belong to the current chunk.
-    """
 
     if not current:
         return True
 
 
-    first = current[0]
+    first = (
+        current[0]
+    )
 
 
-    # Never mix semantically different section types.
     if (
         candidate.chunk_type
         != first.chunk_type
     ):
+
         return False
 
 
-    # Keep named sections distinct.
     if (
         candidate.section
         != first.section
     ):
+
         return False
 
-
-    # For now, avoid combining across physical pages because
-    # multi-column publisher layouts can occasionally have
-    # imperfect reading order.
 
     if not ALLOW_CROSS_PAGE_CHUNKS:
 
@@ -1501,6 +2024,7 @@ def can_combine(
             candidate.page_start
             != current[-1].page_end
         ):
+
             return False
 
 
@@ -1510,13 +2034,12 @@ def can_combine(
 def make_chunk_text(
     segments: list[Segment],
 ) -> str:
-    """
-    Join paragraph-sized segments while retaining paragraphs.
-    """
 
     return "\n\n".join(
         segment.text.strip()
+
         for segment in segments
+
         if segment.text.strip()
     ).strip()
 
@@ -1524,25 +2047,24 @@ def make_chunk_text(
 def assemble_segment_chunks(
     segments: list[Segment],
 ) -> list[list[Segment]]:
-    """
-    Assemble paragraph-sized segments into final chunk groups.
-    """
 
     groups: list[
         list[Segment]
     ] = []
+
 
     current: list[
         Segment
     ] = []
 
 
-    def flush_current() -> None:
+    def flush_current():
 
         nonlocal current
 
         if not current:
             return
+
 
         groups.append(
             current
@@ -1567,14 +2089,13 @@ def assemble_segment_chunks(
             segment,
         ):
 
-            previous = current
+            previous = (
+                current
+            )
+
 
             flush_current()
 
-
-            # Overlap is only appropriate when the next segment
-            # belongs to the same section/type and, unless
-            # explicitly allowed, the same physical page.
 
             overlap_allowed = (
 
@@ -1599,9 +2120,11 @@ def assemble_segment_chunks(
 
             if overlap_allowed:
 
-                current = overlap_tail(
-                    previous,
-                    CHUNK_OVERLAP,
+                current = (
+                    overlap_tail(
+                        previous,
+                        CHUNK_OVERLAP,
+                    )
                 )
 
 
@@ -1636,8 +2159,6 @@ def assemble_segment_chunks(
         )
 
 
-        # Preferred case: stay below target.
-
         if (
             candidate_tokens
             <= CHUNK_TARGET
@@ -1649,9 +2170,6 @@ def assemble_segment_chunks(
 
             continue
 
-
-        # Avoid producing a tiny previous chunk when adding the
-        # new segment still stays below the maximum size.
 
         if (
             current_tokens
@@ -1668,23 +2186,21 @@ def assemble_segment_chunks(
             continue
 
 
-        # Otherwise close the current chunk.
+        previous = (
+            current
+        )
 
-        previous = current
 
         flush_current()
 
 
-        overlap = overlap_tail(
-            previous,
-            CHUNK_OVERLAP,
+        current = (
+            overlap_tail(
+                previous,
+                CHUNK_OVERLAP,
+            )
         )
 
-
-        current = overlap
-
-
-        # Protect against overlap itself causing a large chunk.
 
         candidate_with_overlap = (
             current
@@ -1728,33 +2244,41 @@ def make_chunk_id(
     section: str,
     chunk_type: str,
 ) -> str:
-    """
-    Generate deterministic chunk IDs.
-    """
 
     payload = "|".join(
         [
             document_sha256,
-            str(chunk_index),
-            str(page_start),
-            str(page_end),
+            str(
+                chunk_index
+            ),
+            str(
+                page_start
+            ),
+            str(
+                page_end
+            ),
             section,
             chunk_type,
             text,
         ]
     )
 
-    digest = hashlib.sha256(
-        payload.encode(
-            "utf-8"
+
+    digest = (
+        hashlib.sha256(
+            payload.encode(
+                "utf-8"
+            )
         )
-    ).hexdigest()
+        .hexdigest()
+    )
+
 
     return digest[:24]
 
 
 # =========================================================
-# Public chunking API
+# Public API
 # =========================================================
 
 
@@ -1762,26 +2286,35 @@ def chunk_document(
     document: ParsedDocument,
 ) -> list[ResearchChunk]:
     """
-    Convert one ParsedDocument into research-aware chunks.
+    Convert one parsed research document into final RAG
+    chunks.
     """
 
-    blocks = document_to_blocks(
-        document
+    blocks = (
+        document_to_blocks(
+            document
+        )
     )
 
 
-    blocks = repair_interrupted_layout(
-        blocks
+    blocks = (
+        repair_interrupted_layout(
+            blocks
+        )
     )
 
 
-    blocks = remove_heading_blocks(
-        blocks
+    blocks = (
+        remove_heading_blocks(
+            blocks
+        )
     )
 
 
-    segments = blocks_to_segments(
-        blocks
+    segments = (
+        blocks_to_segments(
+            blocks
+        )
     )
 
 
@@ -1810,8 +2343,10 @@ def chunk_document(
             continue
 
 
-        text = make_chunk_text(
-            group
+        text = (
+            make_chunk_text(
+                group
+            )
         )
 
 
@@ -1848,22 +2383,36 @@ def chunk_document(
         )
 
 
-        chunk_id = make_chunk_id(
-            document_sha256=(
-                document.sha256
-            ),
+        chunk_id = (
+            make_chunk_id(
+                document_sha256=(
+                    document.sha256
+                ),
 
-            chunk_index=index,
+                chunk_index=(
+                    index
+                ),
 
-            text=text,
+                text=(
+                    text
+                ),
 
-            page_start=page_start,
+                page_start=(
+                    page_start
+                ),
 
-            page_end=page_end,
+                page_end=(
+                    page_end
+                ),
 
-            section=section,
+                section=(
+                    section
+                ),
 
-            chunk_type=chunk_type,
+                chunk_type=(
+                    chunk_type
+                ),
+            )
         )
 
 
@@ -1897,7 +2446,9 @@ def chunk_document(
                     chunk_type
                 ),
 
-                text=text,
+                text=(
+                    text
+                ),
 
                 token_count=(
                     token_count
@@ -1921,9 +2472,6 @@ def chunk_document(
 def chunk_statistics(
     chunks: list[ResearchChunk],
 ) -> dict:
-    """
-    Return useful development diagnostics.
-    """
 
     if not chunks:
 
@@ -1965,36 +2513,49 @@ def chunk_statistics(
 
 
     return {
-
         "chunk_count":
-            len(chunks),
+            len(
+                chunks
+            ),
 
         "total_tokens":
-            sum(token_counts),
+            sum(
+                token_counts
+            ),
 
         "min_tokens":
-            min(token_counts),
+            min(
+                token_counts
+            ),
 
         "max_tokens":
-            max(token_counts),
+            max(
+                token_counts
+            ),
 
         "mean_tokens":
             (
-                sum(token_counts)
-                / len(token_counts)
+                sum(
+                    token_counts
+                )
+                / len(
+                    token_counts
+                )
             ),
 
         "below_min":
             sum(
                 1
-                for value in token_counts
+                for value
+                in token_counts
                 if value < CHUNK_MIN
             ),
 
         "above_max":
             sum(
                 1
-                for value in token_counts
+                for value
+                in token_counts
                 if value > CHUNK_MAX
             ),
 

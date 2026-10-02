@@ -170,3 +170,147 @@ if CHUNK_OVERLAP >= CHUNK_TARGET:
         "CHUNK_OVERLAP must be smaller than "
         "CHUNK_TARGET."
     )
+
+# ---------------------------------------------------------
+# Ollama embeddings
+# ---------------------------------------------------------
+
+OLLAMA_BASE_URL = os.getenv(
+    "OLLAMA_BASE_URL",
+    "http://localhost:11434",
+).rstrip("/")
+
+
+EMBED_MODEL = os.getenv(
+    "EMBED_MODEL",
+    "nomic-embed-text",
+)
+
+
+EMBED_BATCH_SIZE = int(
+    os.getenv(
+        "EMBED_BATCH_SIZE",
+        "32",
+    )
+)
+
+
+EMBED_TIMEOUT_SECONDS = float(
+    os.getenv(
+        "EMBED_TIMEOUT_SECONDS",
+        "120",
+    )
+)
+
+
+# ---------------------------------------------------------
+# LanceDB
+# ---------------------------------------------------------
+
+_lancedb_path = Path(
+    os.getenv(
+        "LANCEDB_PATH",
+        "./data/lancedb",
+    )
+)
+
+
+if _lancedb_path.is_absolute():
+
+    LANCEDB_PATH = (
+        _lancedb_path
+    )
+
+else:
+
+    LANCEDB_PATH = (
+        PROJECT_ROOT
+        / _lancedb_path
+    )
+
+
+LANCEDB_PATH.mkdir(
+    parents=True,
+    exist_ok=True,
+)
+
+
+SEMANTIC_TABLE_NAME = os.getenv(
+    "SEMANTIC_TABLE_NAME",
+    "research_chunks",
+)
+
+
+SEMANTIC_TOP_K = int(
+    os.getenv(
+        "SEMANTIC_TOP_K",
+        "5",
+    )
+)
+
+
+# ---------------------------------------------------------
+# Searchable chunk types
+# ---------------------------------------------------------
+
+_searchable_chunk_types = os.getenv(
+    "SEARCHABLE_CHUNK_TYPES",
+    (
+        "body,"
+        "abstract,"
+        "introduction,"
+        "methods,"
+        "results,"
+        "discussion,"
+        "conclusion,"
+        "sidebar,"
+        "caption,"
+        "supplementary"
+    ),
+)
+
+
+SEARCHABLE_CHUNK_TYPES = frozenset(
+
+    item.strip()
+
+    for item in (
+        _searchable_chunk_types.split(
+            ","
+        )
+    )
+
+    if item.strip()
+)
+
+
+# ---------------------------------------------------------
+# Validation
+# ---------------------------------------------------------
+
+if EMBED_BATCH_SIZE <= 0:
+
+    raise ValueError(
+        "EMBED_BATCH_SIZE must be greater than 0."
+    )
+
+
+if EMBED_TIMEOUT_SECONDS <= 0:
+
+    raise ValueError(
+        "EMBED_TIMEOUT_SECONDS must be greater than 0."
+    )
+
+
+if SEMANTIC_TOP_K <= 0:
+
+    raise ValueError(
+        "SEMANTIC_TOP_K must be greater than 0."
+    )
+
+
+if not SEARCHABLE_CHUNK_TYPES:
+
+    raise ValueError(
+        "SEARCHABLE_CHUNK_TYPES cannot be empty."
+    )
