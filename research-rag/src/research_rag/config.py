@@ -97,3 +97,76 @@ SHOW_PROGRESS = get_bool_env(
     "SHOW_PROGRESS",
     True,
 )
+
+# ---------------------------------------------------------
+# Research chunking
+# ---------------------------------------------------------
+
+CHUNK_TARGET = int(
+    os.getenv(
+        "CHUNK_TARGET",
+        "550",
+    )
+)
+
+CHUNK_OVERLAP = int(
+    os.getenv(
+        "CHUNK_OVERLAP",
+        "100",
+    )
+)
+
+CHUNK_MIN = int(
+    os.getenv(
+        "CHUNK_MIN",
+        "180",
+    )
+)
+
+CHUNK_MAX = int(
+    os.getenv(
+        "CHUNK_MAX",
+        "700",
+    )
+)
+
+TOKENIZER_ENCODING = os.getenv(
+    "TOKENIZER_ENCODING",
+    "cl100k_base",
+)
+
+ALLOW_CROSS_PAGE_CHUNKS = get_bool_env(
+    "ALLOW_CROSS_PAGE_CHUNKS",
+    False,
+)
+
+
+# ---------------------------------------------------------
+# Chunking validation
+# ---------------------------------------------------------
+
+if CHUNK_MIN <= 0:
+    raise ValueError(
+        "CHUNK_MIN must be greater than 0."
+    )
+
+if CHUNK_TARGET < CHUNK_MIN:
+    raise ValueError(
+        "CHUNK_TARGET must be >= CHUNK_MIN."
+    )
+
+if CHUNK_MAX < CHUNK_TARGET:
+    raise ValueError(
+        "CHUNK_MAX must be >= CHUNK_TARGET."
+    )
+
+if CHUNK_OVERLAP < 0:
+    raise ValueError(
+        "CHUNK_OVERLAP cannot be negative."
+    )
+
+if CHUNK_OVERLAP >= CHUNK_TARGET:
+    raise ValueError(
+        "CHUNK_OVERLAP must be smaller than "
+        "CHUNK_TARGET."
+    )
