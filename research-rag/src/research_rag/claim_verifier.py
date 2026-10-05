@@ -407,9 +407,11 @@ def prune_answer_to_supported_claims(
         substantive uncited sentences
         other uncited prose
 
-    No LLM is involved.
+    Also performs a very conservative cleanup when pruning
+    removes a sentence that previously supplied context for
+    the next retained sentence.
 
-    Paragraph boundaries are preserved where possible.
+    No LLM is involved.
     """
 
     supported_ids = {
@@ -429,6 +431,198 @@ def prune_answer_to_supported_claims(
 
         return ""
 
+
+    # =====================================================
+    # Conservative opening cleanup
+    # =====================================================
+
+    def clean_orphaned_opening(
+        text: str,
+    ) -> str:
+        """
+        Clean a sentence opening only when earlier material
+        from the same paragraph was removed.
+
+        These transformations alter discourse structure,
+        not scientific content.
+        """
+
+        cleaned = (
+            text.strip()
+        )
+
+
+        # -------------------------------------------------
+        # Remove transition words whose contrast/addition
+        # may have depended on a deleted sentence.
+        # -------------------------------------------------
+
+        transition_patterns = [
+            r"^Conversely,\s+",
+            r"^Additionally,\s+",
+            r"^Furthermore,\s+",
+            r"^Moreover,\s+",
+            r"^However,\s+",
+            r"^Therefore,\s+",
+            r"^Thus,\s+",
+            r"^Consequently,\s+",
+            r"^In contrast,\s+",
+            r"^By contrast,\s+",
+        ]
+
+
+        for pattern in transition_patterns:
+
+            cleaned = re.sub(
+                pattern,
+                "",
+                cleaned,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+
+
+        # -------------------------------------------------
+        # Conservative anaphora cleanup.
+        #
+        # We intentionally handle only common noun phrases
+        # where replacing This/These with The changes the
+        # discourse reference but does not introduce a new
+        # scientific claim.
+        # -------------------------------------------------
+
+        demonstrative_patterns = [
+
+            (
+                r"^This low Reynolds number regime\b",
+                "The low Reynolds number regime",
+            ),
+
+            (
+                r"^This high Reynolds number regime\b",
+                "The high Reynolds number regime",
+            ),
+
+            (
+                r"^This approximation\b",
+                "The approximation",
+            ),
+
+            (
+                r"^This approach\b",
+                "The approach",
+            ),
+
+            (
+                r"^This process\b",
+                "The process",
+            ),
+
+            (
+                r"^This framework\b",
+                "The framework",
+            ),
+
+            (
+                r"^This theory\b",
+                "The theory",
+            ),
+
+            (
+                r"^This model\b",
+                "The model",
+            ),
+
+            (
+                r"^This mechanism\b",
+                "The mechanism",
+            ),
+
+            (
+                r"^This analysis\b",
+                "The analysis",
+            ),
+
+            (
+                r"^This result\b",
+                "The result",
+            ),
+
+            (
+                r"^These analyses\b",
+                "The analyses",
+            ),
+
+            (
+                r"^These results\b",
+                "The results",
+            ),
+
+            (
+                r"^These equations\b",
+                "The equations",
+            ),
+
+            (
+                r"^These parameters\b",
+                "The parameters",
+            ),
+
+            (
+                r"^These observations\b",
+                "The observations",
+            ),
+
+            (
+                r"^These deformations\b",
+                "The deformations",
+            ),
+        ]
+
+
+        for (
+            pattern,
+            replacement,
+        ) in demonstrative_patterns:
+
+            updated = re.sub(
+                pattern,
+                replacement,
+                cleaned,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+
+
+            if updated != cleaned:
+
+                cleaned = updated
+
+                break
+
+
+        # -------------------------------------------------
+        # Restore capitalization if removing a transition
+        # exposed a lowercase first character.
+        # -------------------------------------------------
+
+        if (
+            cleaned
+            and cleaned[0].islower()
+        ):
+
+            cleaned = (
+                cleaned[0].upper()
+                + cleaned[1:]
+            )
+
+
+        return cleaned
+
+
+    # =====================================================
+    # Reconstruct answer
+    # =====================================================
 
     kept_paragraphs: list[str] = []
 
@@ -454,7 +648,11 @@ def prune_answer_to_supported_claims(
             continue
 
 
-        kept_segments: list[str] = []
+        # -------------------------------------------------
+        # Collect the original sentence-like units first.
+        # -------------------------------------------------
+
+        original_segments: list[str] = []
 
 
         lines = [
@@ -490,59 +688,112 @@ def prune_answer_to_supported_claims(
                 )
 
 
-                if not piece:
+                if piece:
 
-                    continue
+                    original_segments.append(
+                        piece
+                    )
 
 
-                claim_text = (
-                    remove_source_citations(
+        # -------------------------------------------------
+        # Decide which segments survive verification.
+        # -------------------------------------------------
+
+        kept_segments: list[str] = []
+
+
+        removed_before_first_kept = False
+
+        first_kept_found = False
+
+
+        for piece in original_segments:
+
+            claim_text = (
+                remove_source_citations(
+                    piece
+                )
+            )
+
+
+            if not claim_text:
+
+                continue
+
+
+            source_ids = (
+                source_ids_from_text(
+                    piece
+                )
+            )
+
+
+            # ---------------------------------------------
+            # Uncited prose is removed.
+            # ---------------------------------------------
+
+            if not source_ids:
+
+                if not first_kept_found:
+
+                    removed_before_first_kept = (
+                        True
+                    )
+
+                continue
+
+
+            # ---------------------------------------------
+            # Citation-bearing sentences correspond to the
+            # claim IDs produced by extract_claim_units().
+            # ---------------------------------------------
+
+            claim_counter += 1
+
+
+            claim_id = (
+                f"C{claim_counter}"
+            )
+
+
+            if (
+                claim_id
+                not in supported_ids
+            ):
+
+                if not first_kept_found:
+
+                    removed_before_first_kept = (
+                        True
+                    )
+
+                continue
+
+
+            # ---------------------------------------------
+            # If earlier material in this paragraph was
+            # deleted, clean only the first retained
+            # sentence's discourse opening.
+            # ---------------------------------------------
+
+            if (
+                not first_kept_found
+                and removed_before_first_kept
+            ):
+
+                piece = (
+                    clean_orphaned_opening(
                         piece
                     )
                 )
 
 
-                if not claim_text:
-
-                    continue
-
-
-                source_ids = (
-                    source_ids_from_text(
-                        piece
-                    )
-                )
+            kept_segments.append(
+                piece
+            )
 
 
-                # -----------------------------------------
-                # All uncited prose is dropped during
-                # deterministic pruning.
-                #
-                # This keeps the resulting answer maximally
-                # conservative.
-                # -----------------------------------------
-
-                if not source_ids:
-
-                    continue
-
-
-                claim_counter += 1
-
-
-                claim_id = (
-                    f"C{claim_counter}"
-                )
-
-
-                if (
-                    claim_id
-                    in supported_ids
-                ):
-
-                    kept_segments.append(
-                        piece
-                    )
+            first_kept_found = True
 
 
         if kept_segments:
