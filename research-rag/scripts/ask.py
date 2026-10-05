@@ -49,8 +49,8 @@ def parse_arguments():
         type=int,
         default=RAG_RETRIEVAL_K,
         help=(
-            "Number of candidate chunks retrieved "
-            "before evidence selection."
+            "Number of candidate chunks retained after "
+            "retrieval refinement."
         ),
     )
 
@@ -92,7 +92,17 @@ def parse_arguments():
         action="store_true",
         help=(
             "Print the raw model answer before deterministic "
-            "citation rendering."
+            "filename/page citation rendering."
+        ),
+    )
+
+
+    parser.add_argument(
+        "--show-all-claims",
+        action="store_true",
+        help=(
+            "Print all claim-support verification results, "
+            "including supported claims."
         ),
     )
 
@@ -117,6 +127,11 @@ def separator():
     )
 
     print()
+
+
+# =========================================================
+# Header
+# =========================================================
 
 
 def display_basic_header(
@@ -161,6 +176,11 @@ def display_basic_header(
     )
 
 
+# =========================================================
+# Retrieval summary
+# =========================================================
+
+
 def display_retrieval_summary(
     result,
 ):
@@ -184,6 +204,11 @@ def display_retrieval_summary(
         f"Evidence tokens:      "
         f"{result.evidence_tokens:,}"
     )
+
+
+# =========================================================
+# Evidence sufficiency
+# =========================================================
 
 
 def display_sufficiency_check(
@@ -292,14 +317,21 @@ def display_sufficiency_check(
         )
 
 
+# =========================================================
+# Generation diagnostics
+# =========================================================
+
+
 def display_generation_diagnostics(
     result,
 ):
     """
     Display LLM completion metadata.
 
-    This makes it easy to see whether a concise retry was
-    required and whether Ollama finished normally.
+    This indicates whether:
+    - generation ended normally
+    - the concise retry was used
+    - how many output tokens were generated
     """
 
     separator()
@@ -351,14 +383,18 @@ def display_generation_diagnostics(
         )
 
 
+# =========================================================
+# Evidence display
+# =========================================================
+
+
 def display_evidence(
     evidence,
 ):
     """
-    Print the complete selected evidence packet.
+    Print the complete evidence packet selected for the LLM.
 
-    This is primarily useful for debugging retrieval and
-    evidence selection.
+    Primarily useful for retrieval/debugging work.
     """
 
     separator()
@@ -417,7 +453,10 @@ def display_evidence(
         )
 
 
-        if item.distance is not None:
+        if (
+            item.distance
+            is not None
+        ):
 
             print(
                 f"Distance: "
@@ -430,6 +469,11 @@ def display_evidence(
         print(
             item.text
         )
+
+
+# =========================================================
+# Answer
+# =========================================================
 
 
 def display_answer(
@@ -452,12 +496,17 @@ def display_answer(
     )
 
 
+# =========================================================
+# Abstention
+# =========================================================
+
+
 def display_abstention(
     result,
 ):
     """
-    Display why the RAG pipeline refused to produce a
-    normal answer.
+    Display why the RAG pipeline refused to return a normal
+    scientific answer.
     """
 
     if not result.abstained:
@@ -479,14 +528,16 @@ def display_abstention(
     )
 
 
+# =========================================================
+# Citation validation
+# =========================================================
+
+
 def display_citation_check(
     result,
 ):
     """
-    Display citation-validation diagnostics.
-
-    Citation diagnostics remain useful even when the system
-    abstains because of a citation failure.
+    Display citation-ID validation diagnostics.
     """
 
     citation = (
@@ -495,9 +546,8 @@ def display_citation_check(
 
 
     # -----------------------------------------------------
-    # For a normal evidence-insufficiency abstention there
-    # was intentionally no generated citation-bearing
-    # answer, so skip this section.
+    # If the query was rejected before answer generation,
+    # citation diagnostics are not meaningful.
     # -----------------------------------------------------
 
     if (
@@ -557,12 +607,298 @@ def display_citation_check(
         )
 
 
+# =========================================================
+# Claim-to-citation support verification
+# =========================================================
+
+
+def display_claim_support_check(
+    result,
+    show_all_claims: bool = False,
+):
+    """
+    Display claim-level evidence-support diagnostics.
+
+    By default, only problematic claims are shown.
+
+    Use --show-all-claims to display every verified claim.
+    """
+
+    check = (
+        result.claim_support_check
+    )
+
+
+    if check is None:
+
+        return
+
+
+    separator()
+
+    print(
+        "CLAIM-TO-CITATION SUPPORT CHECK"
+    )
+
+    print()
+
+
+    print(
+        f"Valid:           "
+        f"{check.valid}"
+    )
+
+    print(
+        f"Pruning attempted: "
+        f"{result.claim_support_pruning_attempted}"
+    )
+
+    print(
+        f"Pruning accepted:  "
+        f"{result.claim_support_pruned}"
+    )
+
+    print(
+        f"Repair attempted:  "
+        f"{result.claim_support_repair_attempted}"
+    )
+
+    print(
+        f"Repair accepted:   "
+        f"{result.claim_support_repaired}"
+    )
+
+    print(
+        f"Supported:       "
+        f"{check.supported_count}"
+    )
+
+    print(
+        f"Partial:         "
+        f"{check.partial_count}"
+    )
+
+    print(
+        f"Unsupported:     "
+        f"{check.unsupported_count}"
+    )
+
+    print(
+        f"Uncited claims:  "
+        f"{len(check.uncited_claims)}"
+    )
+
+
+    if (
+        check.missing_claim_ids
+    ):
+
+        print(
+            f"Missing results: "
+            f"{len(check.missing_claim_ids)}"
+        )
+
+
+    if (
+        check.unknown_claim_ids
+    ):
+
+        print(
+            f"Unknown IDs:     "
+            f"{len(check.unknown_claim_ids)}"
+        )
+
+
+    if (
+        check.verifier_done_reason
+        is not None
+    ):
+
+        print(
+            f"Verifier end:    "
+            f"{check.verifier_done_reason}"
+        )
+
+
+    if (
+        check.verifier_eval_count
+        is not None
+    ):
+
+        print(
+            f"Verifier tokens: "
+            f"{check.verifier_eval_count}"
+        )
+
+
+    print()
+
+    print(
+        f"Reason: "
+        f"{check.reason}"
+    )
+
+
+    # =====================================================
+    # Determine which claim results to display
+    # =====================================================
+
+    if show_all_claims:
+
+        items_to_show = (
+            check.items
+        )
+
+    else:
+
+        items_to_show = [
+
+            item
+
+            for item in check.items
+
+            if (
+                item.verdict
+                != "SUPPORTED"
+            )
+        ]
+
+
+    # =====================================================
+    # Claim results
+    # =====================================================
+
+    if items_to_show:
+
+        print()
+
+        if show_all_claims:
+
+            print(
+                "Claim results:"
+            )
+
+        else:
+
+            print(
+                "Problem claims:"
+            )
+
+
+        for item in items_to_show:
+
+            print()
+
+            print(
+                f"{item.claim_id} — "
+                f"{item.verdict}"
+            )
+
+            print(
+                f"Claim:"
+            )
+
+            print(
+                item.claim_text
+            )
+
+            print()
+
+            print(
+                "Sources:"
+            )
+
+            print(
+                ", ".join(
+                    item.source_ids
+                )
+            )
+
+            print()
+
+            print(
+                "Verifier reason:"
+            )
+
+            print(
+                item.reason
+            )
+
+
+    # =====================================================
+    # Uncited substantive claims
+    # =====================================================
+
+    if check.uncited_claims:
+
+        print()
+
+        print(
+            "Uncited substantive claims:"
+        )
+
+
+        for index, claim in enumerate(
+            check.uncited_claims,
+            start=1,
+        ):
+
+            print()
+
+            print(
+                f"{index}. {claim}"
+            )
+
+
+    # =====================================================
+    # Missing verifier results
+    # =====================================================
+
+    if check.missing_claim_ids:
+
+        print()
+
+        print(
+            "Missing verifier claim IDs:"
+        )
+
+        print(
+            ", ".join(
+                check.missing_claim_ids
+            )
+        )
+
+
+    # =====================================================
+    # Unknown verifier IDs
+    # =====================================================
+
+    if check.unknown_claim_ids:
+
+        print()
+
+        print(
+            "Unexpected verifier claim IDs:"
+        )
+
+        print(
+            ", ".join(
+                check.unknown_claim_ids
+            )
+        )
+
+
+# =========================================================
+# Raw model answer
+# =========================================================
+
+
 def display_raw_answer(
     result,
 ):
     """
-    Display the raw source-ID answer before citation
-    rendering.
+    Display the raw source-ID answer before filename/page
+    citation rendering.
     """
 
     if not result.raw_answer:
@@ -583,12 +919,16 @@ def display_raw_answer(
     )
 
 
+# =========================================================
+# Source map
+# =========================================================
+
+
 def display_source_map(
     evidence,
 ):
     """
-    Display the deterministic mapping between source IDs and
-    PDF metadata.
+    Display deterministic source-ID → PDF metadata mapping.
     """
 
     if not evidence:
@@ -633,7 +973,9 @@ def display_source_map(
 
         section = (
             item.section.strip()
+
             if item.section
+
             else "Unknown section"
         )
 
@@ -729,12 +1071,11 @@ def main():
     # =====================================================
     # Generation diagnostics
     #
-    # Only display this when generation actually occurred.
-    # If the lexical gate rejected the query before Qwen was
-    # called, the metadata will be absent.
+    # Only display if generation actually occurred.
     # =====================================================
 
     generation_occurred = (
+
         result.generation_done_reason
         is not None
 
@@ -784,7 +1125,7 @@ def main():
 
 
     # =====================================================
-    # Citation validation
+    # Citation-ID validation
     # =====================================================
 
     display_citation_check(
@@ -793,7 +1134,21 @@ def main():
 
 
     # =====================================================
-    # Optional raw model answer
+    # Claim-to-citation support verification
+    # =====================================================
+
+    display_claim_support_check(
+
+        result,
+
+        show_all_claims=(
+            args.show_all_claims
+        ),
+    )
+
+
+    # =====================================================
+    # Optional raw answer
     # =====================================================
 
     if args.show_raw_answer:

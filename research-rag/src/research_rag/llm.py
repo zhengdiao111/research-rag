@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Any
 
 import httpx
 
@@ -34,13 +35,17 @@ class OllamaChatClient:
     """
     Small client for Ollama's /api/chat endpoint.
 
-    Besides returning the generated text, the client stores
-    useful metadata about the most recent generation:
+    Supports:
+
+    - normal text generation
+    - structured JSON outputs
+    - per-request temperature overrides
+    - per-request output-token overrides
+
+    Metadata from the most recent generation is retained:
 
         last_done_reason
         last_eval_count
-
-    These allow the RAG layer to detect truncated answers.
     """
 
     def __init__(
@@ -75,7 +80,7 @@ class OllamaChatClient:
 
 
         # -------------------------------------------------
-        # Metadata from most recent generation
+        # Metadata from the most recent generation
         # -------------------------------------------------
 
         self.last_done_reason: str | None = None
@@ -90,9 +95,32 @@ class OllamaChatClient:
     def chat(
         self,
         messages: Sequence[dict],
+        response_format: str | dict[str, Any] | None = None,
+        temperature: float | None = None,
+        max_output_tokens: int | None = None,
     ) -> str:
         """
         Generate one non-streaming response.
+
+        Parameters
+        ----------
+        messages:
+            Ollama chat messages.
+
+        response_format:
+            Optional Ollama structured-output format.
+
+            May be:
+
+                "json"
+
+            or a JSON schema dictionary.
+
+        temperature:
+            Optional per-call temperature override.
+
+        max_output_tokens:
+            Optional per-call num_predict override.
 
         After completion, inspect:
 
@@ -118,7 +146,21 @@ class OllamaChatClient:
         )
 
 
-        payload = {
+        effective_temperature = (
+            self.temperature
+            if temperature is None
+            else temperature
+        )
+
+
+        effective_max_tokens = (
+            self.max_output_tokens
+            if max_output_tokens is None
+            else max_output_tokens
+        )
+
+
+        payload: dict[str, Any] = {
 
             "model":
                 self.model,
@@ -135,15 +177,30 @@ class OllamaChatClient:
             "options": {
 
                 "temperature":
-                    self.temperature,
+                    effective_temperature,
 
                 "num_predict":
-                    self.max_output_tokens,
+                    effective_max_tokens,
             },
         }
 
 
-        # Reset metadata before each call.
+        # -------------------------------------------------
+        # Ollama structured outputs
+        # -------------------------------------------------
+
+        if response_format is not None:
+
+            payload[
+                "format"
+            ] = (
+                response_format
+            )
+
+
+        # -------------------------------------------------
+        # Reset response metadata
+        # -------------------------------------------------
 
         self.last_done_reason = None
 
@@ -190,7 +247,7 @@ class OllamaChatClient:
 
 
         # =================================================
-        # Parse JSON
+        # Parse response JSON
         # =================================================
 
         try:
@@ -207,7 +264,7 @@ class OllamaChatClient:
 
 
         # =================================================
-        # Store completion metadata
+        # Save completion metadata
         # =================================================
 
         done_reason = (
@@ -259,11 +316,13 @@ class OllamaChatClient:
 
 
         # =================================================
-        # Extract response
+        # Extract assistant content
         # =================================================
 
-        message = data.get(
-            "message"
+        message = (
+            data.get(
+                "message"
+            )
         )
 
 
@@ -278,8 +337,10 @@ class OllamaChatClient:
             )
 
 
-        content = message.get(
-            "content"
+        content = (
+            message.get(
+                "content"
+            )
         )
 
 

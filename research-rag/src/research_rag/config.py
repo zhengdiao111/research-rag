@@ -630,3 +630,72 @@ if RERANK_MAX_CAPTIONS < 0:
     raise ValueError(
         "RERANK_MAX_CAPTIONS cannot be negative."
     )
+
+
+# =========================================================
+# Claim-to-citation verification — Milestone 5B.2
+# =========================================================
+
+
+CLAIM_SUPPORT_VERIFY = (
+    os.getenv(
+        "CLAIM_SUPPORT_VERIFY",
+        "true",
+    )
+    .strip()
+    .lower()
+    in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+)
+
+
+CLAIM_SUPPORT_REPAIR = (
+    os.getenv(
+        "CLAIM_SUPPORT_REPAIR",
+        "true",
+    )
+    .strip()
+    .lower()
+    in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+)
+
+
+CLAIM_SUPPORT_MAX_CLAIMS = int(
+    os.getenv(
+        "CLAIM_SUPPORT_MAX_CLAIMS",
+        "24",
+    )
+)
+
+
+CLAIM_SUPPORT_MAX_OUTPUT_TOKENS = int(
+    os.getenv(
+        "CLAIM_SUPPORT_MAX_OUTPUT_TOKENS",
+        "1800",
+    )
+)
+
+
+if CLAIM_SUPPORT_MAX_CLAIMS <= 0:
+
+    raise ValueError(
+        "CLAIM_SUPPORT_MAX_CLAIMS "
+        "must be greater than 0."
+    )
+
+
+if CLAIM_SUPPORT_MAX_OUTPUT_TOKENS <= 0:
+
+    raise ValueError(
+        "CLAIM_SUPPORT_MAX_OUTPUT_TOKENS "
+        "must be greater than 0."
+    )

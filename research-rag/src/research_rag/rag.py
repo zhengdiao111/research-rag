@@ -9,6 +9,8 @@ from .chunker import (
 )
 
 from .config import (
+    CLAIM_SUPPORT_REPAIR,
+    CLAIM_SUPPORT_VERIFY,
     RAG_CITATION_REPAIR,
     RAG_CITATION_VERIFY,
     RAG_EVIDENCE_BUDGET,
@@ -27,6 +29,13 @@ from .embeddings import (
 
 from .llm import (
     OllamaChatClient,
+)
+
+from .claim_verifier import (
+    ClaimSupportCheck,
+    prune_answer_to_supported_claims,
+    repair_claim_support,
+    verify_claim_support,
 )
 
 
@@ -123,6 +132,16 @@ class RAGResult:
     generation_done_reason: str | None
 
     generation_eval_count: int | None
+
+    claim_support_check: ClaimSupportCheck | None = None
+
+    claim_support_pruning_attempted: bool = False
+    
+    claim_support_pruned: bool = False
+
+    claim_support_repair_attempted: bool = False
+
+    claim_support_repaired: bool = False
 
 
 # =========================================================
@@ -2232,6 +2251,389 @@ def answer_question(
             ),
         )
 
+    # =====================================================
+    # Claim-to-citation support verification
+    # =====================================================
+
+    claim_support_check = None
+
+    claim_support_pruning_attempted = False
+
+    claim_support_pruned = False
+
+    claim_support_repair_attempted = False
+
+    claim_support_repaired = False
+
+
+    if CLAIM_SUPPORT_VERIFY:
+
+        # =================================================
+        # First verification of generated answer
+        # =================================================
+
+        claim_support_check = (
+            verify_claim_support(
+
+                answer=(
+                    raw_answer
+                ),
+
+                evidence=(
+                    evidence
+                ),
+
+                llm=(
+                    llm
+                ),
+            )
+        )
+
+
+        # =================================================
+        # Stage 1 — deterministic pruning
+        #
+        # Remove:
+        #   PARTIAL claims
+        #   UNSUPPORTED claims
+        #   uncited prose
+        #
+        # No LLM generation occurs here.
+        # =================================================
+
+        if (
+            not claim_support_check.valid
+        ):
+
+            claim_support_pruning_attempted = (
+                True
+            )
+
+
+            pruned_answer = (
+                prune_answer_to_supported_claims(
+
+                    answer=(
+                        raw_answer
+                    ),
+
+                    support_check=(
+                        claim_support_check
+                    ),
+                )
+            )
+
+
+            # ---------------------------------------------
+            # Only evaluate pruning if something usable
+            # remains and the answer actually changed.
+            # ---------------------------------------------
+
+            if (
+                pruned_answer
+
+                and (
+                    pruned_answer.strip()
+                    != raw_answer.strip()
+                )
+            ):
+
+                pruned_citation_check = (
+                    verify_citations(
+
+                        pruned_answer,
+
+                        evidence,
+                    )
+                )
+
+
+                if (
+                    pruned_citation_check.valid
+                ):
+
+                    pruned_support_check = (
+                        verify_claim_support(
+
+                            answer=(
+                                pruned_answer
+                            ),
+
+                            evidence=(
+                                evidence
+                            ),
+
+                            llm=(
+                                llm
+                            ),
+                        )
+                    )
+
+
+                    # -------------------------------------
+                    # Use the pruned candidate as the new
+                    # working answer even if it still needs
+                    # LLM repair.
+                    #
+                    # This means the repair model starts
+                    # from a shorter, safer draft.
+                    # -------------------------------------
+
+                    raw_answer = (
+                        pruned_answer
+                    )
+
+                    citation_check = (
+                        pruned_citation_check
+                    )
+
+                    claim_support_check = (
+                        pruned_support_check
+                    )
+
+
+                    if (
+                        pruned_support_check.valid
+                    ):
+
+                        claim_support_pruned = (
+                            True
+                        )
+
+
+        # =================================================
+        # Stage 2 — LLM repair fallback
+        #
+        # Only run if deterministic pruning did not produce
+        # a completely supported answer.
+        # =================================================
+
+        if (
+            claim_support_check is not None
+
+            and not claim_support_check.valid
+
+            and CLAIM_SUPPORT_REPAIR
+        ):
+
+            claim_support_repair_attempted = (
+                True
+            )
+
+
+            support_repaired_answer = (
+                repair_claim_support(
+
+                    question=(
+                        question
+                    ),
+
+                    draft_answer=(
+                        raw_answer
+                    ),
+
+                    evidence=(
+                        evidence
+                    ),
+
+                    support_check=(
+                        claim_support_check
+                    ),
+
+                    llm=(
+                        llm
+                    ),
+                )
+            )
+
+
+            support_repair_done_reason = (
+                llm.last_done_reason
+            )
+
+
+            support_repair_eval_count = (
+                llm.last_eval_count
+            )
+
+
+            # ---------------------------------------------
+            # Only consider a completed repair.
+            # ---------------------------------------------
+
+            if (
+                generation_finished_cleanly(
+                    llm,
+                    support_repaired_answer,
+                )
+            ):
+
+                support_repair_citations = (
+                    verify_citations(
+
+                        support_repaired_answer,
+
+                        evidence,
+                    )
+                )
+
+
+                # -----------------------------------------
+                # Repaired answer must still obey citation
+                # syntax before semantic verification.
+                # -----------------------------------------
+
+                if (
+                    support_repair_citations.valid
+                ):
+
+                    repaired_support_check = (
+                        verify_claim_support(
+
+                            answer=(
+                                support_repaired_answer
+                            ),
+
+                            evidence=(
+                                evidence
+                            ),
+
+                            llm=(
+                                llm
+                            ),
+                        )
+                    )
+
+
+                    # -------------------------------------
+                    # Keep the repaired candidate and its
+                    # corresponding diagnostics together.
+                    # -------------------------------------
+
+                    raw_answer = (
+                        support_repaired_answer
+                    )
+
+                    citation_check = (
+                        support_repair_citations
+                    )
+
+                    claim_support_check = (
+                        repaired_support_check
+                    )
+
+
+                    if (
+                        repaired_support_check.valid
+                    ):
+
+                        claim_support_repaired = (
+                            True
+                        )
+
+
+                        generation_done_reason = (
+                            support_repair_done_reason
+                        )
+
+
+                        generation_eval_count = (
+                            support_repair_eval_count
+                        )
+
+
+    # =====================================================
+    # Fail closed if claim support remains invalid
+    # =====================================================
+
+    if (
+        CLAIM_SUPPORT_VERIFY
+
+        and claim_support_check
+        is not None
+
+        and not claim_support_check.valid
+    ):
+
+        return RAGResult(
+
+            question=question,
+
+            answer=(
+                "The retrieved evidence appears sufficient, "
+                "but the generated answer did not pass "
+                "claim-to-citation verification."
+            ),
+
+            raw_answer=(
+                raw_answer
+            ),
+
+            evidence=evidence,
+
+            retrieved_count=(
+                len(
+                    retrieved
+                )
+            ),
+
+            evidence_tokens=sum(
+                item.token_count
+                for item in evidence
+            ),
+
+            citation_check=(
+                citation_check
+            ),
+
+            sufficiency_check=(
+                sufficiency
+            ),
+
+            abstained=True,
+
+            abstention_reason=(
+                "Claim-to-citation support "
+                "verification failed: "
+                f"{claim_support_check.reason}"
+            ),
+
+            citation_repaired=(
+                citation_repaired
+            ),
+
+            generation_retried=(
+                generation_retried
+            ),
+
+            generation_done_reason=(
+                generation_done_reason
+            ),
+
+            generation_eval_count=(
+                generation_eval_count
+            ),
+
+            claim_support_check=(
+                claim_support_check
+            ),
+
+            claim_support_pruning_attempted=(
+                claim_support_pruning_attempted
+            ),
+
+            claim_support_pruned=(
+                claim_support_pruned
+            ),
+
+            claim_support_repair_attempted=(
+                claim_support_repair_attempted
+            ),
+
+            claim_support_repaired=(
+                claim_support_repaired
+            ),
+        )
 
     # =====================================================
     # Render verified citations
@@ -2314,6 +2716,26 @@ def answer_question(
             generation_eval_count=(
                 generation_eval_count
             ),
+
+            claim_support_check=(
+                claim_support_check
+            ),
+
+            claim_support_pruning_attempted=(
+                claim_support_pruning_attempted
+            ),
+
+            claim_support_pruned=(
+                claim_support_pruned
+            ),
+
+            claim_support_repair_attempted=(
+                claim_support_repair_attempted
+            ),
+
+            claim_support_repaired=(
+                claim_support_repaired
+            ),
         )
 
 
@@ -2372,5 +2794,25 @@ def answer_question(
 
         generation_eval_count=(
             generation_eval_count
+        ),
+
+        claim_support_check=(
+            claim_support_check
+        ),
+
+        claim_support_pruning_attempted=(
+            claim_support_pruning_attempted
+        ),
+
+        claim_support_pruned=(
+            claim_support_pruned
+        ),
+
+        claim_support_repair_attempted=(
+            claim_support_repair_attempted
+        ),
+
+        claim_support_repaired=(
+            claim_support_repaired
         ),
     )
