@@ -6,6 +6,7 @@ from typing import Any
 import httpx
 
 from .config import (
+    LLM_CONTEXT_WINDOW,
     LLM_MAX_OUTPUT_TOKENS,
     LLM_MODEL,
     LLM_TEMPERATURE,
@@ -41,11 +42,25 @@ class OllamaChatClient:
     - structured JSON outputs
     - per-request temperature overrides
     - per-request output-token overrides
+    - per-request context-window overrides
 
     Metadata from the most recent generation is retained:
 
         last_done_reason
+        last_prompt_eval_count
         last_eval_count
+
+    Ollama terminology:
+
+        prompt_eval_count
+            Number of input / prompt tokens processed.
+
+        eval_count
+            Number of output tokens generated.
+
+        done_reason
+            Usually "stop" for normal completion or
+            "length" if generation reached a limit.
     """
 
     def __init__(
@@ -55,6 +70,7 @@ class OllamaChatClient:
         timeout_seconds: float = LLM_TIMEOUT_SECONDS,
         temperature: float = LLM_TEMPERATURE,
         max_output_tokens: int = LLM_MAX_OUTPUT_TOKENS,
+        context_window: int = LLM_CONTEXT_WINDOW,
         think: bool = LLM_THINK,
     ):
 
@@ -62,7 +78,9 @@ class OllamaChatClient:
             base_url.rstrip("/")
         )
 
-        self.model = model
+        self.model = (
+            model
+        )
 
         self.timeout_seconds = (
             timeout_seconds
@@ -76,16 +94,69 @@ class OllamaChatClient:
             max_output_tokens
         )
 
-        self.think = think
+        self.context_window = (
+            context_window
+        )
+
+        self.think = (
+            think
+        )
 
 
-        # -------------------------------------------------
+        # =================================================
+        # Validate client configuration
+        # =================================================
+
+        if (
+            self.max_output_tokens
+            <= 0
+        ):
+
+            raise ValueError(
+                "max_output_tokens must be greater "
+                "than zero."
+            )
+
+
+        if (
+            self.context_window
+            <= 0
+        ):
+
+            raise ValueError(
+                "context_window must be greater "
+                "than zero."
+            )
+
+
+        if (
+            self.timeout_seconds
+            <= 0
+        ):
+
+            raise ValueError(
+                "timeout_seconds must be greater "
+                "than zero."
+            )
+
+
+        # =================================================
         # Metadata from the most recent generation
-        # -------------------------------------------------
+        # =================================================
 
-        self.last_done_reason: str | None = None
+        self.last_done_reason: (
+            str | None
+        ) = None
 
-        self.last_eval_count: int | None = None
+
+        self.last_prompt_eval_count: (
+            int | None
+        ) = None
+
+
+        self.last_eval_count: (
+            int | None
+        ) = None
 
 
     # =====================================================
@@ -95,12 +166,17 @@ class OllamaChatClient:
     def chat(
         self,
         messages: Sequence[dict],
-        response_format: str | dict[str, Any] | None = None,
+        response_format: (
+            str
+            | dict[str, Any]
+            | None
+        ) = None,
         temperature: float | None = None,
         max_output_tokens: int | None = None,
+        context_window: int | None = None,
     ) -> str:
         """
-        Generate one non-streaming response.
+        Generate one non-streaming Ollama response.
 
         Parameters
         ----------
@@ -120,11 +196,17 @@ class OllamaChatClient:
             Optional per-call temperature override.
 
         max_output_tokens:
-            Optional per-call num_predict override.
+            Optional per-call Ollama num_predict override.
+
+        context_window:
+            Optional per-call Ollama num_ctx override.
 
         After completion, inspect:
 
             self.last_done_reason
+
+            self.last_prompt_eval_count
+
             self.last_eval_count
         """
 
@@ -146,21 +228,71 @@ class OllamaChatClient:
         )
 
 
+        # =================================================
+        # Resolve per-request settings
+        # =================================================
+
         effective_temperature = (
             self.temperature
+
             if temperature is None
+
             else temperature
         )
 
 
         effective_max_tokens = (
             self.max_output_tokens
+
             if max_output_tokens is None
+
             else max_output_tokens
         )
 
 
-        payload: dict[str, Any] = {
+        effective_context_window = (
+            self.context_window
+
+            if context_window is None
+
+            else context_window
+        )
+
+
+        # =================================================
+        # Validate per-call overrides
+        # =================================================
+
+        if (
+            effective_max_tokens
+            <= 0
+        ):
+
+            raise ValueError(
+                "max_output_tokens must be greater "
+                "than zero."
+            )
+
+
+        if (
+            effective_context_window
+            <= 0
+        ):
+
+            raise ValueError(
+                "context_window must be greater "
+                "than zero."
+            )
+
+
+        # =================================================
+        # Build Ollama request
+        # =================================================
+
+        payload: dict[
+            str,
+            Any,
+        ] = {
 
             "model":
                 self.model,
@@ -179,17 +311,27 @@ class OllamaChatClient:
                 "temperature":
                     effective_temperature,
 
+                # Maximum number of tokens Ollama may
+                # generate for this response.
                 "num_predict":
                     effective_max_tokens,
+
+                # Total model context window available
+                # for prompt + generated response.
+                "num_ctx":
+                    effective_context_window,
             },
         }
 
 
-        # -------------------------------------------------
+        # =================================================
         # Ollama structured outputs
-        # -------------------------------------------------
+        # =================================================
 
-        if response_format is not None:
+        if (
+            response_format
+            is not None
+        ):
 
             payload[
                 "format"
@@ -198,22 +340,39 @@ class OllamaChatClient:
             )
 
 
-        # -------------------------------------------------
+        # =================================================
         # Reset response metadata
-        # -------------------------------------------------
+        # =================================================
 
-        self.last_done_reason = None
+        self.last_done_reason = (
+            None
+        )
 
-        self.last_eval_count = None
+        self.last_prompt_eval_count = (
+            None
+        )
 
+        self.last_eval_count = (
+            None
+        )
+
+
+        # =================================================
+        # Send request
+        # =================================================
 
         try:
 
-            response = httpx.post(
-                url,
-                json=payload,
-                timeout=self.timeout_seconds,
+            response = (
+                httpx.post(
+                    url,
+                    json=payload,
+                    timeout=(
+                        self.timeout_seconds
+                    ),
+                )
             )
+
 
             response.raise_for_status()
 
@@ -222,9 +381,19 @@ class OllamaChatClient:
 
             raise OllamaChatError(
                 "\nCould not connect to Ollama.\n\n"
-                f"Expected Ollama at:\n"
+                "Expected Ollama at:\n"
                 f"{self.base_url}\n\n"
                 "Make sure Ollama is running."
+            ) from exc
+
+
+        except httpx.TimeoutException as exc:
+
+            raise OllamaChatError(
+                "\nOllama chat request timed out.\n\n"
+                f"Timeout: "
+                f"{self.timeout_seconds} seconds\n\n"
+                f"Model: {self.model}"
             ) from exc
 
 
@@ -242,7 +411,8 @@ class OllamaChatClient:
         except httpx.HTTPError as exc:
 
             raise OllamaChatError(
-                f"Ollama HTTP error:\n{exc}"
+                "Ollama HTTP error:\n"
+                f"{exc}"
             ) from exc
 
 
@@ -256,11 +426,23 @@ class OllamaChatClient:
                 response.json()
             )
 
+
         except ValueError as exc:
 
             raise OllamaChatError(
                 "Ollama returned invalid JSON."
             ) from exc
+
+
+        if not isinstance(
+            data,
+            dict,
+        ):
+
+            raise OllamaChatError(
+                "Ollama returned an unexpected "
+                "response structure."
+            )
 
 
         # =================================================
@@ -282,8 +464,10 @@ class OllamaChatClient:
             )
         ):
 
-            done_reason = str(
-                done_reason
+            done_reason = (
+                str(
+                    done_reason
+                )
             )
 
 
@@ -291,6 +475,38 @@ class OllamaChatClient:
             done_reason
         )
 
+
+        # -------------------------------------------------
+        # Prompt / input token count
+        # -------------------------------------------------
+
+        prompt_eval_count = (
+            data.get(
+                "prompt_eval_count"
+            )
+        )
+
+
+        if isinstance(
+            prompt_eval_count,
+            int,
+        ):
+
+            self.last_prompt_eval_count = (
+                prompt_eval_count
+            )
+
+
+        else:
+
+            self.last_prompt_eval_count = (
+                None
+            )
+
+
+        # -------------------------------------------------
+        # Generated / output token count
+        # -------------------------------------------------
 
         eval_count = (
             data.get(
@@ -308,6 +524,7 @@ class OllamaChatClient:
                 eval_count
             )
 
+
         else:
 
             self.last_eval_count = (
@@ -316,7 +533,7 @@ class OllamaChatClient:
 
 
         # =================================================
-        # Extract assistant content
+        # Extract assistant message
         # =================================================
 
         message = (
@@ -367,4 +584,6 @@ class OllamaChatClient:
             )
 
 
-        return content
+        return (
+            content
+        )

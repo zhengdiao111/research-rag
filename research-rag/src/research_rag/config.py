@@ -350,6 +350,13 @@ LLM_MAX_OUTPUT_TOKENS = int(
     )
 )
 
+LLM_CONTEXT_WINDOW = int(
+    os.getenv(
+        "LLM_CONTEXT_WINDOW",
+        "8192",
+    )
+)
+
 
 LLM_THINK = get_bool_env(
     "LLM_THINK",

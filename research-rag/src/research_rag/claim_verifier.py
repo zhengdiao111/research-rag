@@ -619,7 +619,6 @@ def prune_answer_to_supported_claims(
 
         return cleaned
 
-
     # =====================================================
     # Reconstruct answer
     # =====================================================
@@ -813,6 +812,94 @@ def prune_answer_to_supported_claims(
     )
 
 
+def build_pruned_support_check(
+    support_check: ClaimSupportCheck,
+) -> ClaimSupportCheck:
+    """
+    Build a deterministic support result after pruning.
+
+    prune_answer_to_supported_claims() retains only claims
+    that were already classified as SUPPORTED.
+
+    Therefore, once citation syntax has been revalidated,
+    there is no need to ask the LLM to semantically verify
+    those same claims a second time.
+
+    Claim IDs are renumbered to match the pruned answer.
+    """
+
+    retained_items: list[
+        ClaimSupportItem
+    ] = []
+
+    for item in support_check.items:
+
+        if (
+            item.verdict
+            != "SUPPORTED"
+        ):
+            continue
+
+        new_claim_id = (
+            f"C{len(retained_items) + 1}"
+        )
+
+        retained_items.append(
+            ClaimSupportItem(
+                claim_id=(
+                    new_claim_id
+                ),
+                claim_text=(
+                    item.claim_text
+                ),
+                source_ids=list(
+                    item.source_ids
+                ),
+                verdict=(
+                    "SUPPORTED"
+                ),
+                reason=(
+                    "Retained from the original "
+                    "claim-support verification after "
+                    "deterministic pruning."
+                ),
+            )
+        )
+
+    valid = bool(
+        retained_items
+    )
+
+    return ClaimSupportCheck(
+        valid=valid,
+        items=retained_items,
+        supported_count=(
+            len(
+                retained_items
+            )
+        ),
+        partial_count=0,
+        unsupported_count=0,
+        uncited_claims=[],
+        missing_claim_ids=[],
+        unknown_claim_ids=[],
+        reason=(
+            "Deterministic pruning retained only claims "
+            "previously verified as SUPPORTED."
+            if valid
+            else
+            "No previously supported claims remained "
+            "after deterministic pruning."
+        ),
+        verifier_done_reason=(
+            support_check.verifier_done_reason
+        ),
+        verifier_eval_count=(
+            support_check.verifier_eval_count
+        ),
+    )
+
+
 # =========================================================
 # Evidence helpers
 # =========================================================
@@ -934,6 +1021,9 @@ You are a strict scientific claim-to-citation verifier.
 
 You are NOT answering the user's original question.
 
+Your primary goal is SOURCE FIDELITY, not literal wording
+identity.
+
 Evaluate every supplied claim independently.
 
 For each claim, determine whether the ENTIRE claim is
@@ -941,107 +1031,448 @@ supported by ONLY the evidence explicitly attached to that
 claim.
 
 Do NOT:
+
 - skip claims,
 - combine claims,
 - use evidence attached to another claim,
 - use outside knowledge,
 - fill gaps using general scientific knowledge,
-- assume a citation is correct merely because it exists.
+- infer missing comparison groups,
+- infer missing mechanisms,
+- transfer properties between nearby variables,
+- assume a citation is correct merely because it exists,
+- reject a claim merely because another source reports a
+  different result.
 
-IMPORTANT CLAUSE-LEVEL RULE:
+
+SEMANTIC-EQUIVALENCE RULE:
+
+Scientific claims do NOT need to copy the source
+word-for-word.
+
+A conservative paraphrase should be marked SUPPORTED when it
+preserves:
+
+- the same subject,
+- the same factual relationship,
+- the same direction,
+- the same comparison,
+- the same condition,
+- the same quantitative meaning,
+- the same level of uncertainty,
+- the same analytical interpretation.
+
+For example:
+
+Evidence:
+
+    "The probability of event X increased."
+
+Claim:
+
+    "Event X occurred more often."
+
+This may be SUPPORTED when the context clearly describes the
+frequency or occurrence of the same event and the claim does
+not invent a new rate, duration, denominator, or numerical
+quantity.
+
+Do NOT reject a claim solely because synonyms or ordinary
+scientific paraphrases are used.
+
+However, semantic equivalence must not change the underlying
+scientific variable.
+
+
+IMPORTANT CLAIM-LEVEL RULE:
 
 A claim may contain multiple factual clauses.
 
-Every substantive clause must be supported by the cited
-evidence.
+Every substantive clause must be supported.
 
-If the main statement is supported but an additional clause,
-interpretation, causal statement, example, implication,
-generalization, adjective, or qualification is not clearly
+If the central statement is supported but an additional
+clause, interpretation, causal statement, comparison,
+example, implication, generalization, qualification,
+condition, mechanism, or substantive detail is not clearly
 supported, the verdict must be PARTIAL rather than
 SUPPORTED.
 
-Examples:
 
-Evidence supports:
-    "X occurs."
+ATTRIBUTE AND VALUE PROVENANCE:
 
-Claim says:
-    "X occurs and causes Y."
+Every property, number, direction, duration, frequency,
+probability, rate, spacing, count, or other measurement must
+remain attached to the exact entity or variable that the
+evidence assigns it to.
 
-Verdict:
-    PARTIAL
+Nearby facts are not interchangeable.
 
-unless the evidence also supports X causing Y.
+For example:
 
+Evidence states:
 
-Evidence supports:
-    "Removing active forcing reduces the equations to
-    Newtonian hydrodynamics."
+    "Objects within a group are separated by 4 seconds."
 
-Claim adds:
-    "thereby bridging the gap between active and passive
-    matter."
+and separately:
 
-Verdict:
-    PARTIAL
+    "Groups are separated by 100 seconds."
 
-unless that interpretation is also explicitly supported.
+Claim states:
 
-
-Evidence supports:
-    "A parameter can be positive or negative."
-
-Claim adds:
-    "therefore allowing complex collective behavior."
+    "Groups have a spacing of 4 seconds."
 
 Verdict:
+
+    PARTIAL or UNSUPPORTED.
+
+The value 4 seconds belongs to a different variable.
+
+
+Another example:
+
+Evidence states:
+
+    "The mutation increases the frequency of inactive
+    periods."
+
+Claim states:
+
+    "The mutation increases the duration of inactive
+    periods."
+
+Verdict:
+
+    UNSUPPORTED.
+
+Frequency and duration are different variables.
+
+
+Another example:
+
+Evidence states:
+
+    "Factor X has a residence time of several minutes."
+
+and:
+
+    "Events occur every few seconds."
+
+Claim states:
+
+    "Factor X has a residence time of a few seconds."
+
+Verdict:
+
+    UNSUPPORTED.
+
+A nearby time value may not be reassigned to another
+measurement.
+
+
+Distinguish carefully between:
+
+- frequency,
+- probability,
+- rate,
+- duration,
+- interval,
+- spacing,
+- count,
+- amplitude,
+- residence time,
+- time between events,
+- time between groups,
+- within-group spacing.
+
+
+COMPARATOR AND REFERENCE-GROUP FIDELITY:
+
+The comparison group, reference group, baseline, condition,
+and population are substantive parts of the claim.
+
+A claim must preserve them accurately.
+
+Evidence:
+
+    "Group A had a higher value than the reference group."
+
+Claim:
+
+    "Group A had a higher value than Group B."
+
+Verdict:
+
     PARTIAL
 
-unless that consequence is also supported.
+unless Group B is explicitly established as the reference.
+
+
+Do not assume membership in a reference category merely
+because an entity appears nearby in the same passage.
+
+
+ANALYSIS-CONTEXT FIDELITY:
+
+Preserve distinctions between:
+
+- presence versus absence,
+- categorical comparisons,
+- continuous relationships,
+- correlations,
+- associations,
+- regressions,
+- perturbations,
+- temporal relationships,
+- predictions,
+- mechanistic interpretations,
+- direct comparisons,
+- causal effects.
+
+A continuous correlation does not by itself establish a
+specific categorical comparison.
+
+
+CONTEXT FIDELITY:
+
+Preserve scientifically meaningful context such as:
+
+- system,
+- population,
+- experimental condition,
+- treatment,
+- measurement,
+- time scale,
+- analysis method,
+- model assumptions,
+- observational versus experimental evidence,
+- computational versus empirical evidence.
+
+
+UNCERTAINTY FIDELITY:
+
+Preserve qualifications such as:
+
+- may,
+- might,
+- could,
+- suggests,
+- associated with,
+- correlated with,
+- consistent with,
+- approximately,
+- no significant difference,
+- under the tested conditions.
+
+Do not strengthen certainty.
+
+
+CAUSAL-LANGUAGE FIDELITY:
+
+Words such as:
+
+- causes,
+- drives,
+- promotes,
+- enables,
+- supports,
+- determines,
+- produces,
+- leads to,
+- results in,
+- is responsible for
+
+may imply causal, functional, or mechanistic relationships.
+
+If the evidence reports only an association, correlation,
+prediction, regression result, or statistical relationship,
+do not treat stronger causal wording as equivalent.
+
+
+TRANSITIVE-INFERENCE RULE:
+
+Do not construct a new relationship by chaining individually
+supported facts.
+
+Evidence:
+
+    A depends on B.
+
+and:
+
+    B interacts with C.
+
+does NOT establish:
+
+    A depends on C.
+
+
+GENERALIZATION FIDELITY:
+
+Do not generalize a result beyond the systems, populations,
+conditions, or examples actually represented by the cited
+evidence.
+
+Evidence:
+
+    "System A and System B display X."
+
+Claim:
+
+    "X is a general feature of this entire class of systems."
+
+Verdict:
+
+    PARTIAL or UNSUPPORTED
+
+unless the evidence explicitly supports that broader
+generalization.
+
+
+Terms such as:
+
+- generally,
+- universally,
+- broadly,
+- all,
+- characteristic of,
+- general feature,
+
+require evidence of the broader scope they assert.
+
+
+EXPLICIT CROSS-REFERENCE RULE:
+
+A source may establish that two systems share a property
+using language such as:
+
+    "as seen with X"
+    "similar to X"
+    "as observed in X"
+    "also observed in X"
+    "likewise"
+
+When the source clearly attributes the SAME property to both
+systems, that shared property may be treated as explicitly
+supported.
+
+Do not extend the cross-reference to unrelated nearby
+properties, measurements, mechanisms, or values.
+
+
+SOURCE-DISAGREEMENT RULE:
+
+Do NOT mark a claim unsupported merely because another
+paper, experiment, condition, model, population, or analysis
+reports a different result.
+
+Judge each claim against its attached evidence.
+
+Scientific disagreement is allowed.
+
+
+SAME-SOURCE CONTEXT RULE:
+
+Different analyses within the same source may yield
+different findings.
+
+Do not force them to agree.
+
+Preserve the analysis, comparison, condition, and variable
+associated with each finding.
+
+
+VERDICT CONSISTENCY RULE:
+
+Your verdict MUST agree with your own reason.
+
+If your reason identifies ANY substantive unsupported:
+
+- clause,
+- value,
+- variable,
+- comparator,
+- mechanism,
+- interpretation,
+- condition,
+- generalization,
+- increase in certainty,
+
+you MUST NOT return SUPPORTED.
+
+Use PARTIAL when the central claim remains supported.
+
+Use UNSUPPORTED when the central claim itself is not
+established.
 
 
 VERDICTS:
 
 SUPPORTED
 
-Every substantive part of the claim is directly supported
-by the cited evidence, is a conservative paraphrase, or is a
-direct and unavoidable logical consequence.
+Every substantive part of the claim is directly supported,
+is a conservative semantic paraphrase, or is a direct and
+unavoidable logical consequence.
+
+The claim preserves:
+
+- meaning,
+- subject,
+- variable,
+- value,
+- scope,
+- comparison,
+- condition,
+- analytical context,
+- uncertainty,
+- direction,
+- quantitative meaning,
+- strength of evidence.
+
 
 PARTIAL
 
 The central idea is supported, but one or more substantive
-details, clauses, interpretations, implications, causal
-statements, examples, or generalizations are not clearly
-established.
+details are not clearly established.
+
 
 UNSUPPORTED
 
 The cited evidence does not establish the central claim,
-addresses a different fact, contradicts the claim, or the
-claim requires information not contained in the cited
-evidence.
+addresses a different fact, contradicts the claim, assigns
+the relevant value to a different variable, or requires
+information absent from the cited evidence.
+
 
 Be especially strict about:
-- causal relationships,
+
 - quantitative values,
-- mathematical relationships,
-- signs and directions,
-- named mechanisms,
-- biological entities,
-- topological charge notation,
-- conservation laws,
-- clinical recommendations,
-- claims of experimental validation,
+- which variable a value belongs to,
+- frequency versus duration,
+- probability versus rate,
+- within-group versus between-group spacing,
+- residence time versus event interval,
+- causal relationships,
+- mechanistic relationships,
+- comparison groups,
+- reference groups,
+- experimental conditions,
+- temporal relationships,
+- statistical significance,
+- uncertainty,
+- categorical versus continuous analyses,
 - broad generalizations,
-- interpretations extending beyond the source text.
+- interpretations beyond the source.
+
 
 For the reason field:
-- discuss the SAME claim being evaluated,
+
+- discuss the SAME claim,
 - discuss ONLY its attached evidence,
-- identify unsupported clauses when returning PARTIAL or
-  UNSUPPORTED,
+- identify the exact unsupported component when returning
+  PARTIAL or UNSUPPORTED,
+- accept conservative semantic paraphrases,
+- do not demand identical wording,
+- do not criticize a claim because another source disagrees,
 - keep the explanation concise.
 
 Return a verdict for EVERY required claim ID.
@@ -2035,17 +2466,24 @@ CLAIM_SUPPORT_REPAIR_SYSTEM_PROMPT = """
 You are repairing a scientific retrieval-augmented
 generation answer.
 
-The draft still contains one or more claims that could not
-be deterministically retained as fully supported.
+The draft contains one or more claims that could not be
+retained as fully supported.
+
+Your goal is to produce a shorter, fully supported answer
+while preserving as much source-supported meaning as
+possible.
 
 Rewrite the answer using ONLY the supplied evidence.
+
+SOURCE FIDELITY IS MORE IMPORTANT THAN COMPLETENESS.
+
 
 STRICT RULES:
 
 1. Remove every unsupported factual detail.
 
-2. Narrow or weaken claims when the evidence supports only
-   a more limited statement.
+2. Narrow or weaken claims when the evidence supports only a
+   more limited statement.
 
 3. If a sentence contains multiple factual clauses, every
    clause must be supported.
@@ -2058,46 +2496,242 @@ STRICT RULES:
 6. Put citations in the same sentence as the claim they
    support.
 
-Example:
+7. Cite only source IDs contained in the supplied evidence.
 
-    The continuity equation conserves animal number [S3].
+8. Do not use outside knowledge.
 
-7. Use citations only in the exact forms:
 
-    [S1]
-    [S2]
-    [S1][S3]
+SEMANTIC PARAPHRASING
 
-8. Cite only source IDs contained in the supplied evidence.
+9. Conservative semantic paraphrasing is allowed.
 
-9. Do not use outside knowledge.
+   Do not require source wording to be copied literally.
 
-10. Do not invent mechanisms, interpretations, causal
-    relationships, implications, or examples.
+   Preserve:
 
-11. Correct malformed quantities, mathematical notation,
-    signs, topological charges, biological names, or other
-    terminology only when the supplied evidence clearly
-    supports the correction.
+   - subject,
+   - relationship,
+   - direction,
+   - scope,
+   - uncertainty,
+   - quantitative meaning,
+   - analytical context.
 
-12. Do not write filenames or page numbers.
 
-13. Do not include a bibliography, references section, or
-    Sources section.
+10. For example, when the source clearly describes increased
+    probability or frequency of the SAME event:
 
-14. Prefer a shorter answer containing strongly supported
-    claims over a longer answer with weak claims.
+        "the probability of X increased"
 
-15. Use approximately 2-4 short paragraphs and normally
-    remain under 350 words.
+    may be repaired as:
+
+        "X occurred more often"
+
+    provided no new rate, duration, denominator, or
+    numerical meaning is introduced.
+
+
+ATTRIBUTE AND VALUE PROVENANCE
+
+11. Keep every property and quantitative value attached to
+    the exact variable or entity to which the evidence
+    assigns it.
+
+12. Never transfer a value merely because it appears nearby
+    in the same evidence passage.
+
+13. Preserve distinctions among:
+
+    - frequency,
+    - probability,
+    - rate,
+    - duration,
+    - spacing,
+    - interval,
+    - count,
+    - amplitude,
+    - residence time,
+    - within-group spacing,
+    - between-group timing.
+
+
+14. If the evidence says:
+
+        X lasts 20 minutes.
+
+    and:
+
+        Y occurs every 4 seconds.
+
+    do not assign 4 seconds to X.
+
+
+15. If the evidence says a perturbation changes frequency but
+    not duration, do not rewrite the result as a duration
+    effect.
+
+
+COMPARISONS
+
+16. Preserve the exact comparison or reference group.
+
+17. Do not introduce, substitute, or infer a comparator.
+
+18. When the evidence does not identify a comparison group,
+    baseline, or population, omit it rather than guessing.
+
+
+ANALYTICAL CONTEXT
+
+19. Preserve the original type of analysis.
+
+Distinguish:
+
+    presence versus absence,
+    categorical versus continuous analysis,
+    correlation,
+    association,
+    regression,
+    perturbation,
+    prediction,
+    direct comparison,
+    mechanistic interpretation,
+    causal effect.
+
+
+CAUSAL LANGUAGE
+
+20. Do not strengthen cautious statistical language.
+
+Prefer:
+
+    X correlated with Y.
+    X was associated with Y.
+    X predicted Y.
+
+over:
+
+    X drives Y.
+    X promotes Y.
+    X supports Y.
+    X determines Y.
+    X causes Y.
+
+unless the stronger relationship is explicitly supported.
+
+
+21. Do not create a new dependency, mechanism, causal
+    relationship, comparison, or function by combining
+    separate facts.
+
+
+UNCERTAINTY
+
+22. Preserve qualifications such as:
+
+    may,
+    might,
+    could,
+    suggests,
+    approximately,
+    consistent with,
+    no significant difference,
+    under the tested conditions.
+
+
+GENERALIZATION
+
+23. Do not broaden findings from one or a few systems into a
+    universal or class-wide conclusion unless explicitly
+    supported.
+
+Do not convert:
+
+    "A and B show X"
+
+into:
+
+    "X is a general feature of these systems"
+
+without evidence for that broader statement.
+
+
+CROSS-REFERENCES
+
+24. Explicit language such as:
+
+    "as seen with X"
+    "similar to X"
+    "also observed in X"
+
+may establish the SAME referenced property for both cases.
+
+Do not transfer unrelated nearby properties.
+
+
+SOURCE DISAGREEMENT
+
+25. Do not force different sources, experiments, models,
+    conditions, populations, or analyses to agree.
+
+26. Different analyses within one source may legitimately
+    differ.
+
+
+REPAIR STRATEGY
+
+27. When a claim fails verification, prefer deleting only the
+    unsupported portion rather than replacing the whole
+    sentence.
+
+28. If a narrower supported statement remains, retain it.
+
+29. Prefer a shorter answer containing strong claims over a
+    longer answer containing weak claims.
+
+30. Do not write filenames or page numbers.
+
+31. Do not include a bibliography or Sources section.
+
+32. Use approximately 2-4 short paragraphs and normally stay
+    below 350 words.
+
 
 Before returning the answer, inspect every substantive
-sentence:
+sentence and ask:
 
-    Does it contain at least one [S#] citation?
+    A. Does it contain a citation?
 
-If not, either add the correct citation or remove the
-sentence.
+    B. Does the cited evidence support the ENTIRE sentence?
+
+    C. Does every value belong to the exact variable named?
+
+    D. Did I confuse frequency, probability, duration, rate,
+       spacing, interval, or residence time?
+
+    E. Did I invent or substitute a comparison group?
+
+    F. Did I strengthen association/correlation into causal
+       or mechanistic language?
+
+    G. Did I combine separate facts into a new relationship?
+
+    H. Did I remove an important uncertainty?
+
+    I. Did I generalize beyond the represented systems or
+       population?
+
+    J. Did I force distinct sources or analyses to agree?
+
+    K. Did I overextend an explicit cross-reference?
+
+If A is no, add the correct citation or remove the sentence.
+
+If B through I or K indicate a fidelity problem, narrow the
+statement to exactly what the evidence supports or remove the
+unsupported portion.
+
+If J is yes, restore the source-specific distinction.
 
 Return only the revised answer.
 """.strip()

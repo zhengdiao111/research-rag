@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 
+import json
+
 from dataclasses import dataclass
 
 from .chunker import (
@@ -11,6 +13,7 @@ from .chunker import (
 from .config import (
     CLAIM_SUPPORT_REPAIR,
     CLAIM_SUPPORT_VERIFY,
+    LLM_MAX_OUTPUT_TOKENS,
     RAG_CITATION_REPAIR,
     RAG_CITATION_VERIFY,
     RAG_EVIDENCE_BUDGET,
@@ -33,6 +36,7 @@ from .llm import (
 
 from .claim_verifier import (
     ClaimSupportCheck,
+    build_pruned_support_check,
     prune_answer_to_supported_claims,
     repair_claim_support,
     verify_claim_support,
@@ -281,19 +285,35 @@ def extract_anchor_terms(
     terms: list[str],
 ) -> list[str]:
     """
-    Identify distinctive query terms.
+    Identify high-precision query terms that should normally
+    appear literally in the retrieved evidence.
 
-    Examples:
+    Anchors are deliberately conservative.
 
-        pembrolizumab
+    Good anchors include identifiers such as:
+
         SMARCA2
         BRM014
-        reaction-diffusion
+        HIV-1
         rs123456
+        reaction-diffusion
+        IL-6
+
+    Ordinary scientific words are NOT anchors merely because
+    they are long.
+
+    Semantic concepts such as:
+
+        synchronizes
+        transcriptional
+        mechanistic
+
+    may be expressed using synonyms in the source and should
+    therefore be evaluated by the semantic sufficiency check
+    rather than forced to match literally.
     """
 
     anchors: list[str] = []
-
 
     for term in terms:
 
@@ -302,29 +322,18 @@ def extract_anchor_terms(
             for char in term
         )
 
-
         contains_hyphen = (
             "-"
             in term
         )
 
-
-        unusually_long = (
-            len(term)
-            >= 12
-        )
-
-
         if (
             contains_digit
             or contains_hyphen
-            or unusually_long
         ):
-
             anchors.append(
                 term
             )
-
 
     return anchors
 
@@ -993,32 +1002,290 @@ def lexical_sufficiency_check(
 
 
 SUFFICIENCY_SYSTEM_PROMPT = """
-You are an evidence sufficiency classifier.
+You are an evidence-answerability classifier for a local
+retrieval-augmented generation system.
 
-You are NOT answering the scientific question.
+You are NOT answering the user's question.
 
-Your only job is to determine whether the supplied evidence
-contains enough relevant information to attempt an answer.
+Your only task is to determine whether the SUPPLIED EVIDENCE
+contains enough information to produce a grounded answer to
+the QUESTION.
 
-Use only the supplied evidence.
+The classification is about ANSWERABILITY, not whether the
+proposition in the question is true.
 
-Return exactly two lines:
 
-SUFFICIENT: YES
+CRITICAL RULE
 
-or
+A question is ANSWERABLE when the supplied evidence supports
+a grounded:
 
-SUFFICIENT: NO
+- yes,
+- no,
+- qualified yes,
+- qualified no,
+- mixed answer,
+- or evidence-based uncertainty statement.
 
-and then:
+Evidence that contradicts the proposition in the user's
+question can still make the question fully answerable.
 
-REASON: <brief explanation>
+Do NOT classify evidence as insufficient merely because the
+correct answer is "no."
 
-Choose NO if:
-- the evidence is about a different subject,
-- the key entity or concept is missing,
-- only tangential material is present,
-- the requested detail cannot be supported.
+
+EXAMPLE 1 — NEGATIVE ANSWER
+
+QUESTION:
+
+Does treatment X increase outcome Y?
+
+EVIDENCE:
+
+Treatment X produced no significant change in outcome Y
+relative to control.
+
+CLASSIFICATION:
+
+ANSWERABLE
+
+Reason:
+
+The evidence directly answers the question in the negative.
+
+
+EXAMPLE 2 — EXCLUSIVITY CLAIM
+
+QUESTION:
+
+Does the study prove that mechanism X is the only mechanism
+responsible for the effect?
+
+EVIDENCE:
+
+The study supports mechanism X as one possible explanation,
+but explicitly states that other mechanisms cannot be
+excluded.
+
+CLASSIFICATION:
+
+ANSWERABLE
+
+Reason:
+
+The evidence directly answers the exclusivity question in
+the negative. It supports X as a possible mechanism but does
+not establish X as the only mechanism.
+
+
+EXAMPLE 3 — FALSE PREMISE
+
+QUESTION:
+
+Did Group A have a higher value than Group B?
+
+EVIDENCE:
+
+Group A had a significantly lower value than Group B.
+
+CLASSIFICATION:
+
+ANSWERABLE
+
+Reason:
+
+The evidence directly resolves the comparison even though
+the answer contradicts the proposition in the question.
+
+
+EXAMPLE 4 — QUALIFIED ANSWER
+
+QUESTION:
+
+Does factor X cause outcome Y?
+
+EVIDENCE:
+
+Factor X was correlated with Y, but the study did not test
+causality.
+
+CLASSIFICATION:
+
+ANSWERABLE
+
+Reason:
+
+The evidence supports a qualified answer: an association was
+observed, but causation was not established.
+
+
+EXAMPLE 5 — GENUINELY INSUFFICIENT
+
+QUESTION:
+
+Which alternative mechanism explains the effect if
+mechanism X is not responsible?
+
+EVIDENCE:
+
+The study states only that other mechanisms cannot be
+excluded.
+
+CLASSIFICATION:
+
+INSUFFICIENT
+
+Reason:
+
+The evidence establishes that alternatives may exist but
+does not identify which alternative mechanism explains the
+effect.
+
+
+EXAMPLE 6 — PARTIAL INFORMATION IS NOT ENOUGH
+
+QUESTION:
+
+What were the values of parameters X and Y?
+
+EVIDENCE:
+
+The document reports parameter X = 4.2 but does not provide
+parameter Y.
+
+CLASSIFICATION:
+
+INSUFFICIENT
+
+Reason:
+
+An essential requested detail, parameter Y, is absent.
+
+
+Use ONLY the supplied evidence.
+
+The documents in this system may contain:
+
+- scientific literature,
+- books,
+- internal project terminology,
+- proprietary terminology,
+- private or local information,
+- synthetic test documents,
+- fictional examples,
+- document-specific definitions,
+- names or concepts that do not exist in general public
+  knowledge.
+
+Do NOT require a term, entity, coefficient, project,
+parameter, mechanism, or concept to be recognized by
+general scientific knowledge or outside sources.
+
+Do NOT reject evidence merely because:
+
+- a concept is fictional,
+- a term is synthetic,
+- a name is unfamiliar,
+- the information is document-specific,
+- the information exists only in the supplied documents,
+- the document explicitly says it is a test fixture.
+
+The supplied evidence itself is the authority.
+
+
+Choose ANSWERABLE when:
+
+- the evidence directly states the requested information,
+- the evidence directly supports an affirmative answer,
+- the evidence directly supports a negative answer,
+- the evidence contradicts the proposition in the question
+  in a way that resolves the question,
+- the evidence supports a qualified or mixed answer,
+- the evidence defines an unfamiliar term or entity,
+- the answer can be conservatively inferred from the
+  supplied evidence,
+- uncertainty itself is documented well enough to answer
+  what the evidence does and does not establish,
+- all essential parts of the question can be addressed
+  without outside knowledge.
+
+
+Choose INSUFFICIENT when:
+
+- the key entity or concept is absent,
+- the evidence concerns a different subject,
+- only tangentially related material is present,
+- an essential requested detail is missing,
+- neither an affirmative nor negative answer can be
+  supported,
+- the evidence merely mentions the topic without resolving
+  the question,
+- answering requires outside knowledge,
+- not all essential parts of the question can be addressed.
+
+
+DECISION PROCEDURE
+
+Ask this:
+
+    "Can a scientifically grounded response to the user's
+    actual question be written from this evidence?"
+
+Do NOT ask this:
+
+    "Does the evidence prove that the proposition embedded
+    in the user's question is true?"
+
+
+For yes/no questions:
+
+    Evidence supports YES
+        -> ANSWERABLE
+
+    Evidence supports NO
+        -> ANSWERABLE
+
+    Evidence supports a qualified YES or NO
+        -> ANSWERABLE
+
+    Evidence establishes what is and is not known
+        sufficiently to answer the question
+        -> ANSWERABLE
+
+    Evidence does not resolve the question
+        -> INSUFFICIENT
+
+
+For questions containing words such as:
+
+    prove,
+    only,
+    always,
+    never,
+    necessary,
+    sufficient,
+    causes,
+    determines,
+
+pay special attention to whether the evidence supports or
+rejects that strong proposition.
+
+If the evidence explicitly says that alternatives remain
+possible, then a question asking whether something is the
+ONLY explanation is usually ANSWERABLE with "no."
+
+
+Do not judge whether the information is scientifically true
+in the real world.
+
+Do not judge whether the concept is generally accepted,
+published, or externally verifiable.
+
+Judge ONLY whether the supplied evidence contains enough
+information for a grounded answer.
+
+Return only the structured classification requested by the
+response schema.
 
 Do not answer the original question.
 """.strip()
@@ -1034,9 +1301,14 @@ def llm_sufficiency_check(
 ]:
     """
     Ask the local LLM whether the retrieved evidence is
-    sufficient to attempt the answer.
+    sufficient to answer the question.
 
-    Parsing failure is treated as insufficient evidence.
+    The classifier returns an answerability label rather
+    than a raw boolean so negative answers are not confused
+    with insufficient evidence.
+
+    Uses structured JSON output rather than parsing
+    free-form text.
     """
 
     context = (
@@ -1057,8 +1329,58 @@ def llm_sufficiency_check(
     )
 
 
+    # =====================================================
+    # Structured-output schema
+    # =====================================================
+
+    schema = {
+
+        "type":
+            "object",
+
+        "properties": {
+
+            "answerability": {
+
+                "type":
+                    "string",
+
+                "enum": [
+                    "ANSWERABLE",
+                    "INSUFFICIENT",
+                ],
+            },
+
+            "reason": {
+
+                "type":
+                    "string",
+
+                "minLength":
+                    1,
+
+                "maxLength":
+                    500,
+            },
+        },
+
+        "required": [
+            "answerability",
+            "reason",
+        ],
+
+        "additionalProperties":
+            False,
+    }
+
+
+    # =====================================================
+    # Classifier call
+    # =====================================================
+
     response = (
         llm.chat(
+
             [
                 {
                     "role":
@@ -1075,59 +1397,127 @@ def llm_sufficiency_check(
                     "content":
                         prompt,
                 },
-            ]
+            ],
+
+            response_format=(
+                schema
+            ),
+
+            temperature=0.0,
+
+            max_output_tokens=300,
         )
     )
 
 
-    match = re.search(
-        r"SUFFICIENT\s*:\s*(YES|NO)",
-        response,
-        flags=re.IGNORECASE,
-    )
+    # =====================================================
+    # Require clean completion
+    # =====================================================
 
+    if (
+        llm.last_done_reason
+        is not None
 
-    reason_match = re.search(
-        r"REASON\s*:\s*(.+)",
-        response,
-        flags=(
-            re.IGNORECASE
-            | re.DOTALL
-        ),
-    )
+        and llm.last_done_reason
+        != "stop"
+    ):
 
-
-    if reason_match:
-
-        reason = (
-            reason_match
-            .group(1)
-            .strip()
-        )
-
-    else:
-
-        reason = (
-            response.strip()
+        return (
+            False,
+            (
+                "Evidence answerability classifier did not "
+                "finish cleanly. "
+                f"done_reason="
+                f"{llm.last_done_reason!r}"
+            ),
         )
 
 
-    if not match:
+    # =====================================================
+    # Parse JSON
+    # =====================================================
+
+    try:
+
+        data = (
+            json.loads(
+                response
+            )
+        )
+
+
+    except json.JSONDecodeError:
 
         return (
             False,
             (
                 "Could not reliably parse the evidence "
-                "sufficiency classifier."
+                "answerability classifier."
+            ),
+        )
+
+
+    if not isinstance(
+        data,
+        dict,
+    ):
+
+        return (
+            False,
+            (
+                "Evidence answerability classifier returned "
+                "an invalid structured response."
+            ),
+        )
+
+
+    answerability = (
+        data.get(
+            "answerability"
+        )
+    )
+
+
+    reason = (
+        str(
+            data.get(
+                "reason",
+                "",
+            )
+        )
+        .strip()
+    )
+
+
+    if (
+        answerability
+        not in {
+            "ANSWERABLE",
+            "INSUFFICIENT",
+        }
+    ):
+
+        return (
+            False,
+            (
+                "Evidence answerability classifier did not "
+                "return a valid classification."
             ),
         )
 
 
     sufficient = (
-        match.group(1)
-        .upper()
-        == "YES"
+        answerability
+        == "ANSWERABLE"
     )
+
+
+    if not reason:
+
+        reason = (
+            "No explanation was provided by the evidence "
+            "answerability classifier."
+        )
 
 
     return (
@@ -1145,22 +1535,349 @@ SYSTEM_PROMPT = """
 You are a research assistant answering questions from a
 local scientific document library.
 
+Your primary goal is source fidelity.
+
+Answer the user's question using ONLY the supplied evidence
+while preserving the meaning, scope, comparisons,
+measurements, variables, conditions, uncertainty, and
+analytical context of the source material.
+
 Follow these rules strictly:
 
 1. Use only the evidence supplied in the user message.
+
 2. Do not rely on outside knowledge.
-3. Do not invent facts, mechanisms, citations, authors,
-   titles, page numbers, or source IDs.
+
+3. Do not invent facts, mechanisms, relationships,
+   interpretations, citations, authors, titles, page numbers,
+   source IDs, experimental conditions, comparison groups,
+   variables, measurements, quantitative values, or missing
+   context.
+
 4. Every substantive factual claim must have an inline
    source citation such as [S1] or [S2].
+
 5. Multiple sources may be cited as [S1][S3].
+
 6. Cite only source IDs supplied in the evidence.
+
 7. Never use author-year citations such as (Smith, 2024).
+
 8. Never cite filenames directly.
-9. If the evidence does not support a claim, do not make it.
-10. If the evidence is insufficient, state:
+
+9. If the supplied evidence does not support a claim, do not
+   make it.
+
+
+SOURCE FIDELITY
+
+10. Preserve the original meaning and scope of each source.
+
+    Do not make a claim broader, stronger, more specific, or
+    more certain than the evidence supports.
+
+
+11. Conservative semantic paraphrasing is allowed.
+
+    The answer does NOT need to repeat the source
+    word-for-word.
+
+    Different wording is acceptable when it preserves:
+
+    - the same subject,
+    - the same relationship,
+    - the same direction,
+    - the same quantity or qualitative strength,
+    - the same uncertainty,
+    - the same comparison,
+    - the same conditions,
+    - the same analytical meaning.
+
+    For example, when the context clearly refers to how
+    frequently an event occurs:
+
+        "increased probability of the event"
+
+    may be conservatively paraphrased as:
+
+        "the event occurred more often"
+
+    provided that no new rate, denominator, duration, or
+    quantitative interpretation is introduced.
+
+
+ATTRIBUTE AND VALUE PROVENANCE
+
+12. Keep every property attached to the exact entity,
+    variable, measurement, condition, or process to which
+    the source assigns it.
+
+    Nearby facts are NOT interchangeable.
+
+    For example, distinguish:
+
+    - spacing between individual objects,
+    - time between groups of objects,
+    - duration of a state,
+    - frequency of entering a state,
+    - probability of an event,
+    - number of objects,
+    - rate of an event.
+
+    Do not transfer a value or property from one variable to
+    another merely because they occur in the same passage.
+
+
+13. Quantitative values must preserve their exact referent.
+
+    If the source says:
+
+        X lasts 20 minutes.
+
+    and separately:
+
+        Y occurs every 4 seconds.
+
+    do NOT assign 4 seconds to X or 20 minutes to Y.
+
+
+14. Preserve frequency, duration, probability, rate,
+    spacing, amplitude, count, and timing as distinct
+    quantities unless the source explicitly equates them.
+
+
+COMPARISON FIDELITY
+
+15. Preserve the original comparison or reference group.
+
+    Do not replace, broaden, narrow, or invent a comparator.
+
+    If the evidence says:
+
+        Group A differs from the reference group.
+
+    do NOT rewrite this as:
+
+        Group A differs from Group B.
+
+    unless the supplied evidence explicitly identifies
+    Group B as the relevant comparison group.
+
+
+16. If the evidence reports a difference, association, or
+    lack of significant difference without clearly
+    identifying the comparison group, baseline, or
+    reference condition, do not supply one yourself.
+
+
+ANALYSIS FIDELITY
+
+17. Preserve the original analytical context.
+
+    Distinguish when relevant between:
+
+    - presence versus absence,
+    - categorical versus continuous variables,
+    - high versus low values,
+    - association,
+    - correlation,
+    - regression,
+    - perturbation,
+    - direct comparison,
+    - temporal relationship,
+    - prediction,
+    - mechanistic interpretation,
+    - causal effect.
+
+
+18. Do not transform one type of analysis or evidence into
+    another.
+
+    For example:
+
+    correlation is not causation,
+    prediction is not determination,
+    regression is not necessarily a pairwise comparison.
+
+
+19. Preserve experimental and observational context when it
+    matters to the meaning of the result.
+
+    This may include:
+
+    - system or population,
+    - condition,
+    - treatment,
+    - measurement,
+    - time scale,
+    - analysis method,
+    - model assumptions,
+    - experimental versus computational evidence.
+
+
+CAUSAL AND MECHANISTIC FIDELITY
+
+20. Do not infer new relationships by chaining separate
+    supported facts.
+
+    If the evidence says:
+
+        A requires B.
+
+    and separately says:
+
+        B interacts with C.
+
+    do NOT conclude:
+
+        A requires C.
+
+    unless the supplied evidence explicitly supports that
+    relationship.
+
+
+21. Preserve the strength of causal language.
+
+    Do not convert:
+
+        "associated with"
+
+    into:
+
+        "causes"
+
+    or:
+
+        "correlated with"
+
+    into:
+
+        "drives".
+
+    Words such as:
+
+        causes,
+        drives,
+        promotes,
+        enables,
+        supports,
+        determines,
+        produces,
+        leads to
+
+    may imply stronger causal or mechanistic relationships
+    than the source establishes.
+
+
+UNCERTAINTY
+
+22. Preserve uncertainty and statistical qualification.
+
+    Preserve statements such as:
+
+        may,
+        might,
+        could,
+        suggests,
+        consistent with,
+        approximately,
+        no significant difference,
+        under these conditions
+
+    when they materially affect the meaning.
+
+
+23. Distinguish observations from interpretations.
+
+    If a source reports an observation and separately offers
+    a possible explanation, do not present the explanation as
+    an established result.
+
+
+GENERALIZATION
+
+24. Do not generalize beyond the population or systems
+    actually represented by the evidence.
+
+    Evidence from one or a few examples does not by itself
+    establish that a phenomenon is:
+
+        universal,
+        general to all systems,
+        characteristic of all members of a class,
+        broadly applicable,
+
+    unless the supplied evidence explicitly supports that
+    broader conclusion.
+
+
+25. For example, evidence that:
+
+        System A and System B show property X
+
+    does NOT by itself establish:
+
+        X is a general property of all systems of this type.
+
+
+EXPLICIT CROSS-REFERENCES
+
+26. Scientific writing may establish shared properties using
+    explicit language such as:
+
+        "as seen with X"
+        "similar to X"
+        "as observed in X"
+        "also observed in X"
+        "likewise"
+
+    Such language may support the SAME referenced property
+    for both systems.
+
+    Do not extend the cross-reference to unrelated nearby
+    properties.
+
+
+SOURCE DISAGREEMENT
+
+27. Preserve source-specific findings even when different
+    sources, experiments, conditions, models, populations,
+    or analyses report different results.
+
+    Do not force retrieved sources to agree.
+
+
+28. Different analyses within the same source may also yield
+    different or context-dependent findings.
+
+    Preserve those distinctions rather than merging them
+    into one stronger conclusion.
+
+
+ANSWER SCOPE
+
+29. Answer the user's specific question first.
+
+    Do not expand into related mechanisms, comparisons, or
+    background unless they materially help answer the
+    question.
+
+
+30. For simple definition questions, begin with a concise
+    definition before adding supporting detail.
+
+
+31. When the evidence supports only part of the question,
+    answer the supported part and clearly state what the
+    supplied evidence does not establish.
+
+
+32. If the evidence is insufficient to answer the question,
+    state:
+
     "The available evidence is insufficient to answer this
     question."
+
 
 Do not create a bibliography or Sources section.
 
@@ -1173,8 +1890,9 @@ Unless the user explicitly requests an extensive review:
 - use 2-5 short paragraphs,
 - stay below about 500 words,
 - prioritize the most relevant evidence,
+- preserve important qualifications and context,
 - do not summarize every retrieved source,
-- do not repeat mechanisms or conclusions,
+- do not repeat conclusions unnecessarily,
 - stop once the question has been answered.
 """.strip()
 
@@ -1187,22 +1905,93 @@ Your previous attempt was too long and was truncated.
 
 Generate a NEW, shorter answer from scratch.
 
+Your primary goals are:
+
+- source fidelity,
+- concise completion,
+- citation correctness.
+
 Strict rules:
 
 1. Use only the supplied evidence.
+
 2. Do not use outside knowledge.
+
 3. Every substantive factual claim must have an inline
    citation in the exact form [S1], [S2], etc.
+
 4. Use only source IDs provided in the evidence.
+
 5. Never use author-year citations.
+
 6. Never write filenames or page numbers yourself.
+
 7. Do not include a bibliography or Sources section.
-8. Do not discuss every retrieved source.
-9. Prioritize only the evidence necessary to answer the
-   question.
-10. Maximum length: 350 words.
-11. Use at most 4 short paragraphs.
-12. Finish with a complete sentence and then stop.
+
+8. Prioritize only evidence needed to answer the question.
+
+9. Preserve the original meaning, scope, uncertainty,
+   conditions, comparisons, variables, and qualifications.
+
+10. Conservative semantic paraphrases are allowed when they
+    preserve the source's scientific meaning.
+
+11. Do not require word-for-word correspondence with the
+    source.
+
+12. Keep each value or property attached to the exact
+    variable or entity it describes.
+
+    Do not confuse:
+
+        frequency,
+        probability,
+        duration,
+        rate,
+        spacing,
+        count,
+        amplitude,
+        time between events.
+
+13. Do not borrow a quantitative value from a nearby but
+    different variable.
+
+14. Preserve the exact comparator or reference group.
+
+15. Do not infer a relationship by chaining separate facts.
+
+16. Preserve the type of analysis reported by the source.
+
+17. Do not transform:
+
+    - correlation into causation,
+    - association into causation,
+    - regression into direct comparison,
+    - continuous trends into categorical effects,
+    - prediction into determination,
+    - interpretation into established fact.
+
+18. Preserve uncertainty and statistical qualification.
+
+19. Do not generalize beyond the systems, populations, or
+    conditions actually represented by the evidence.
+
+20. Explicit source cross-references such as "as seen with X"
+    may establish the referenced shared property, but no
+    additional nearby properties.
+
+21. Do not force different sources or analyses to agree.
+
+22. Prefer one main factual claim per sentence.
+
+23. Answer the user's exact question before adding related
+    details.
+
+24. Maximum length: 350 words.
+
+25. Use at most 4 short paragraphs.
+
+26. Finish with a complete sentence and then stop.
 
 If the evidence is insufficient, write exactly:
 
@@ -1294,7 +2083,13 @@ def generate_grounded_answer(
                     "content":
                         user_prompt,
                 },
-            ]
+            ],
+
+            temperature=0.2,
+
+            max_output_tokens=(
+                LLM_MAX_OUTPUT_TOKENS
+            ),
         )
     )
 
@@ -1361,7 +2156,16 @@ def generate_grounded_answer(
                     "content":
                         user_prompt,
                 },
-            ]
+            ],
+
+            temperature=0.1,
+
+            max_output_tokens=(
+                min(
+                    LLM_MAX_OUTPUT_TOKENS,
+                    1400,
+                )
+            ),
         )
     )
 
@@ -1917,19 +2721,20 @@ def answer_question(
 
 
     # =====================================================
-    # Initialize LLM
-    # =====================================================
-
-    llm = (
-        OllamaChatClient()
-    )
-
-
-    # =====================================================
     # LLM sufficiency gate
     # =====================================================
 
     if RAG_SUFFICIENCY_CHECK:
+
+        # -------------------------------------------------
+        # Use a dedicated classifier client so classifier
+        # settings cannot affect answer generation.
+        # -------------------------------------------------
+
+        sufficiency_llm = (
+            OllamaChatClient()
+        )
+
 
         (
             llm_sufficient,
@@ -1941,7 +2746,7 @@ def answer_question(
 
                 evidence=evidence,
 
-                llm=llm,
+                llm=sufficiency_llm,
             )
         )
 
@@ -1951,13 +2756,19 @@ def answer_question(
         )
 
 
+        # -------------------------------------------------
+        # Preserve the LLM classifier's explanation for
+        # both successful and unsuccessful decisions.
+        # -------------------------------------------------
+
+        sufficiency.reason = (
+            llm_reason
+        )
+
+
         if not llm_sufficient:
 
             sufficiency.sufficient = False
-
-            sufficiency.reason = (
-                llm_reason
-            )
 
 
             return (
@@ -1981,18 +2792,22 @@ def answer_question(
                         llm_reason
                     ),
 
-                    generation_done_reason=(
-                        llm.last_done_reason
-                    ),
+                    generation_done_reason=None,
 
-                    generation_eval_count=(
-                        llm.last_eval_count
-                    ),
+                    generation_eval_count=None,
 
                     generation_retried=False,
                 )
             )
 
+
+    # =====================================================
+    # Initialize main answer-generation LLM
+    # =====================================================
+
+    llm = (
+        OllamaChatClient()
+    )
 
     # =====================================================
     # Generate grounded answer
@@ -2352,22 +3167,40 @@ def answer_question(
                     pruned_citation_check.valid
                 ):
 
+                    # -------------------------------------------------
+                    # The pruning function retained ONLY claims that
+                    # were already classified as SUPPORTED.
+                    #
+                    # Do not ask the LLM to judge the same claims again.
+                    # A second stochastic verification can flip a valid
+                    # verdict and cause an unnecessary abstention.
+                    # -------------------------------------------------
+
                     pruned_support_check = (
-                        verify_claim_support(
-
-                            answer=(
-                                pruned_answer
-                            ),
-
-                            evidence=(
-                                evidence
-                            ),
-
-                            llm=(
-                                llm
-                            ),
+                        build_pruned_support_check(
+                            claim_support_check
                         )
                     )
+
+                    if (
+                        pruned_support_check.valid
+                    ):
+
+                        raw_answer = (
+                            pruned_answer
+                        )
+
+                        citation_check = (
+                            pruned_citation_check
+                        )
+
+                        claim_support_check = (
+                            pruned_support_check
+                        )
+
+                        claim_support_pruned = (
+                            True
+                        )
 
 
                     # -------------------------------------
