@@ -22,6 +22,11 @@ from .embeddings import (
     OllamaEmbedder,
 )
 
+from .index_manifest import (
+    build_current_index_manifest,
+    write_index_manifest,
+)
+
 from .parser import (
     discover_pdfs,
     parse_pdf,
@@ -147,19 +152,46 @@ def build_semantic_index(
     document_root: Path = DOCUMENT_ROOT,
 ) -> IndexSummary:
     """
-    Parse, chunk, embed, and index the complete research
-    library.
+    Parse, chunk, embed, and rebuild the complete research
+    semantic index.
 
-    Milestone 3 rebuilds the semantic table every run.
+    Safety behavior
+    ---------------
+
+    The existing LanceDB table is not overwritten until:
+
+    - every PDF has been parsed,
+    - every searchable chunk has been produced,
+    - every embedding has been generated,
+    - all replacement records exist in memory,
+    - the embedding dimension has been validated.
+
+    Therefore, parsing or embedding failures leave the
+    existing semantic table untouched.
+
+    After the replacement table is successfully created,
+    the current index manifest is written. A manifest write
+    failure will cause future incremental syncs to fail
+    closed rather than silently accepting an unknown index.
     """
 
-    document_root = Path(
-        document_root
+    document_root = (
+        Path(
+            document_root
+        )
+        .expanduser()
+        .resolve()
     )
 
 
-    pdfs = discover_pdfs(
-        document_root
+    pdfs = sorted(
+        discover_pdfs(
+            document_root
+        ),
+        key=lambda path: (
+            str(path)
+            .casefold()
+        ),
     )
 
 
@@ -218,7 +250,7 @@ def build_semantic_index(
 
 
     # =====================================================
-    # Process documents
+    # Process every document before touching LanceDB
     # =====================================================
 
     for document_index, pdf_path in enumerate(
@@ -245,8 +277,10 @@ def build_semantic_index(
         # Parse
         # -------------------------------------------------
 
-        document = parse_pdf(
-            pdf_path
+        document = (
+            parse_pdf(
+                pdf_path
+            )
         )
 
 
@@ -254,36 +288,53 @@ def build_semantic_index(
         # Chunk
         # -------------------------------------------------
 
-        chunks = chunk_document(
-            document
+        chunks = (
+            chunk_document(
+                document
+            )
         )
 
 
-        total_chunks += len(
-            chunks
+        total_chunks += (
+            len(
+                chunks
+            )
         )
 
 
         searchable = [
+
             chunk
+
             for chunk in chunks
-            if is_searchable_chunk(
-                chunk
+
+            if (
+                is_searchable_chunk(
+                    chunk
+                )
             )
         ]
 
 
         skipped = (
-            len(chunks)
-            - len(searchable)
+            len(
+                chunks
+            )
+            - len(
+                searchable
+            )
         )
 
 
-        searchable_chunks += len(
-            searchable
+        searchable_chunks += (
+            len(
+                searchable
+            )
         )
 
-        skipped_chunks += skipped
+        skipped_chunks += (
+            skipped
+        )
 
 
         print()
@@ -319,7 +370,9 @@ def build_semantic_index(
         # -------------------------------------------------
 
         texts = [
+
             chunk.text
+
             for chunk in searchable
         ]
 
@@ -331,10 +384,13 @@ def build_semantic_index(
         )
 
 
-        if len(
-            vectors
-        ) != len(
-            searchable
+        if (
+            len(
+                vectors
+            )
+            != len(
+                searchable
+            )
         ):
 
             raise RuntimeError(
@@ -354,15 +410,21 @@ def build_semantic_index(
 
             records.append(
                 make_record(
-                    document=document,
-                    chunk=chunk,
-                    vector=vector,
+                    document=(
+                        document
+                    ),
+                    chunk=(
+                        chunk
+                    ),
+                    vector=(
+                        vector
+                    ),
                 )
             )
 
 
     # =====================================================
-    # Save LanceDB table
+    # Validate complete replacement BEFORE database write
     # =====================================================
 
     if not records:
@@ -370,21 +432,6 @@ def build_semantic_index(
         raise RuntimeError(
             "No searchable chunks were generated."
         )
-
-
-    print()
-    print("=" * 80)
-
-    print(
-        "Writing LanceDB table..."
-    )
-
-    print("=" * 80)
-
-
-    replace_semantic_table(
-        records
-    )
 
 
     dimension = (
@@ -399,10 +446,78 @@ def build_semantic_index(
         )
 
 
+    if dimension <= 0:
+
+        raise RuntimeError(
+            "Embedding dimension must be greater than 0."
+        )
+
+
+    for record_index, record in enumerate(
+        records,
+        start=1,
+    ):
+
+        vector = (
+            record.get(
+                "vector"
+            )
+        )
+
+
+        if (
+            vector is None
+            or len(
+                vector
+            )
+            != dimension
+        ):
+
+            raise RuntimeError(
+                "Embedding dimension mismatch in "
+                f"record {record_index}."
+            )
+
+
+    # =====================================================
+    # Replace LanceDB table
+    # =====================================================
+
+    print()
+    print("=" * 80)
+
+    print(
+        "Writing replacement LanceDB table..."
+    )
+
+    print("=" * 80)
+
+
+    replace_semantic_table(
+        records
+    )
+
+
+    # =====================================================
+    # Persist reproducibility manifest
+    # =====================================================
+
+    current_manifest = (
+        build_current_index_manifest()
+    )
+
+
+    write_index_manifest(
+        current_manifest
+    )
+
+
     return IndexSummary(
 
-        pdf_count=len(
-            pdfs
+        pdf_count=(
+            len(
+                pdfs
+            )
         ),
 
         total_chunks=(
@@ -421,7 +536,9 @@ def build_semantic_index(
             dimension
         ),
 
-        table_rows=len(
-            records
+        table_rows=(
+            len(
+                records
+            )
         ),
     )

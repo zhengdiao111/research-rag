@@ -7,6 +7,11 @@ from pathlib import Path
 
 from research_rag.config import (
     DOCUMENT_ROOT,
+    INDEX_MANIFEST_PATH,
+)
+
+from research_rag.database import (
+    open_semantic_table,
 )
 
 from research_rag.incremental_indexer import (
@@ -17,6 +22,14 @@ from research_rag.index_manifest import (
     build_current_index_manifest,
 )
 
+from research_rag.indexer import (
+    build_semantic_index,
+)
+
+from research_rag.parser import (
+    discover_pdfs,
+)
+
 
 # =========================================================
 # CLI
@@ -25,13 +38,13 @@ from research_rag.index_manifest import (
 
 def parse_arguments():
     """
-    Parse incremental-indexing options.
+    Parse index synchronization / rebuild options.
     """
 
     parser = argparse.ArgumentParser(
         description=(
-            "Incrementally synchronize the local research "
-            "PDF library with LanceDB."
+            "Synchronize or fully rebuild the local "
+            "research-PDF LanceDB index."
         )
     )
 
@@ -62,8 +75,9 @@ def parse_arguments():
         "--sync-deletions",
         action="store_true",
         help=(
-            "Remove LanceDB rows for PDFs that no longer "
-            "exist under the document root."
+            "During normal incremental sync, remove "
+            "LanceDB rows for PDFs that no longer exist "
+            "under the document root."
         ),
     )
 
@@ -77,15 +91,34 @@ def parse_arguments():
     )
 
 
-    parser.add_argument(
+    mode_group = (
+        parser.add_mutually_exclusive_group()
+    )
+
+
+    mode_group.add_argument(
         "--adopt-current-index",
         action="store_true",
         help=(
             "Initialize a missing index manifest using "
             "the current pipeline configuration without "
             "rebuilding the existing index. Use this only "
-            "for the one-time migration of an index that "
-            "you know was built using the current settings."
+            "for the one-time migration of an index known "
+            "to have been built with the current settings."
+        ),
+    )
+
+
+    mode_group.add_argument(
+        "--rebuild",
+        action="store_true",
+        help=(
+            "Fully rebuild the semantic index from all "
+            "PDFs using the current parser, chunker, "
+            "filters, and embedding model. This mode "
+            "intentionally bypasses stale-manifest "
+            "blocking because rebuilding is how a stale "
+            "index is repaired."
         ),
     )
 
@@ -111,6 +144,7 @@ def separator():
     print()
 
 
+
 def print_file_group(
     title: str,
     paths: list[str],
@@ -133,61 +167,270 @@ def print_file_group(
 
 
 # =========================================================
-# Main
+# Optimization helper
 # =========================================================
 
 
-def main():
+def optimize_current_table() -> tuple[
+    bool,
+    str | None,
+]:
+    """
+    Optimize the active semantic table.
 
-    args = (
-        parse_arguments()
+    Optimization failure does not invalidate an otherwise
+    successful rebuild or incremental write.
+    """
+
+    try:
+
+        table = (
+            open_semantic_table()
+        )
+
+        table.optimize()
+
+        return (
+            True,
+            None,
+        )
+
+
+    except Exception as exc:
+
+        return (
+            False,
+            (
+                f"{type(exc).__name__}: "
+                f"{exc}"
+            ),
+        )
+
+
+# =========================================================
+# Rebuild mode
+# =========================================================
+
+
+def run_rebuild(
+    args,
+    current_manifest,
+) -> None:
+    """
+    Execute or preview a complete semantic-index rebuild.
+    """
+
+    root = (
+        args.root
+        .expanduser()
+        .resolve()
     )
 
 
     separator()
 
     print(
-        "Research RAG — Incremental Index Sync"
+        "FULL REBUILD MODE"
     )
 
     print()
 
     print(
-        f"Root: "
-        f"{args.root.resolve()}"
+        "This rebuild intentionally bypasses the current "
+        "manifest compatibility gate."
+    )
+
+    print()
+
+    print(
+        "The existing LanceDB table will not be overwritten "
+        "until all PDFs have been parsed, chunked, embedded, "
+        "and validated successfully."
+    )
+
+    print()
+
+
+    if args.sync_deletions:
+
+        print(
+            "NOTE:"
+        )
+
+        print(
+            "--sync-deletions is unnecessary during a full "
+            "rebuild. The replacement table contains only "
+            "PDFs currently present under the document root."
+        )
+
+        print()
+
+
+    # =====================================================
+    # Rebuild dry run
+    # =====================================================
+
+    if args.dry_run:
+
+        pdfs = sorted(
+            discover_pdfs(
+                root
+            ),
+            key=lambda path: (
+                str(path)
+                .casefold()
+            ),
+        )
+
+
+        print(
+            f"PDFs that would be rebuilt: "
+            f"{len(pdfs)}"
+        )
+
+        print(
+            f"Target fingerprint: "
+            f"{current_manifest.fingerprint}"
+        )
+
+        print(
+            f"Manifest path: "
+            f"{INDEX_MANIFEST_PATH}"
+        )
+
+
+        separator()
+
+        print(
+            "DRY RUN — no PDFs were parsed, no embeddings "
+            "were generated, and no database or manifest "
+            "changes were made."
+        )
+
+        separator()
+
+        return
+
+
+    # =====================================================
+    # Build complete replacement
+    # =====================================================
+
+    summary = (
+        build_semantic_index(
+            document_root=(
+                root
+            )
+        )
+    )
+
+
+    # =====================================================
+    # Optional optimization
+    # =====================================================
+
+    optimized = False
+
+    optimize_error: str | None = None
+
+
+    if not args.no_optimize:
+
+        (
+            optimized,
+            optimize_error,
+        ) = (
+            optimize_current_table()
+        )
+
+
+    # =====================================================
+    # Rebuild summary
+    # =====================================================
+
+    separator()
+
+    print(
+        "FULL REBUILD COMPLETE"
+    )
+
+    print()
+
+    print(
+        f"PDFs processed:       "
+        f"{summary.pdf_count}"
     )
 
     print(
-        f"Dry run: "
-        f"{args.dry_run}"
+        f"Chunks generated:     "
+        f"{summary.total_chunks}"
     )
 
     print(
-        f"Sync deletions: "
-        f"{args.sync_deletions}"
+        f"Semantic chunks:      "
+        f"{summary.searchable_chunks}"
     )
 
     print(
-        f"Optimize after write: "
-        f"{not args.no_optimize}"
-    )
-
-
-    current_manifest = (
-        build_current_index_manifest()
-    )
-
-
-    print(
-        f"Adopt current index: "
-        f"{args.adopt_current_index}"
+        f"Excluded chunks:      "
+        f"{summary.skipped_chunks}"
     )
 
     print(
-        f"Pipeline fingerprint: "
-        f"{current_manifest.fingerprint[:16]}..."
+        f"Embedding dimension:  "
+        f"{summary.embedding_dimension}"
     )
 
+    print(
+        f"LanceDB rows:         "
+        f"{summary.table_rows}"
+    )
+
+    print(
+        f"LanceDB optimized:    "
+        f"{optimized}"
+    )
+
+    print()
+
+    print(
+        f"Manifest fingerprint: "
+        f"{current_manifest.fingerprint}"
+    )
+
+    print(
+        f"Manifest path:        "
+        f"{INDEX_MANIFEST_PATH}"
+    )
+
+
+    if optimize_error:
+
+        print()
+
+        print(
+            "Optimization warning:"
+        )
+
+        print(
+            optimize_error
+        )
+
+
+    separator()
+
+
+# =========================================================
+# Incremental mode
+# =========================================================
+
+
+def run_incremental(
+    args,
+) -> None:
+    """
+    Execute the existing incremental synchronization path.
+    """
 
     print()
 
@@ -355,6 +598,86 @@ def main():
 
 
     separator()
+
+
+# =========================================================
+# Main
+# =========================================================
+
+
+def main():
+
+    args = (
+        parse_arguments()
+    )
+
+
+    current_manifest = (
+        build_current_index_manifest()
+    )
+
+
+    separator()
+
+    print(
+        "Research RAG — Index Management"
+    )
+
+    print()
+
+    print(
+        f"Root: "
+        f"{args.root.expanduser().resolve()}"
+    )
+
+    print(
+        f"Dry run: "
+        f"{args.dry_run}"
+    )
+
+    print(
+        f"Rebuild: "
+        f"{args.rebuild}"
+    )
+
+    print(
+        f"Sync deletions: "
+        f"{args.sync_deletions}"
+    )
+
+    print(
+        f"Optimize after write: "
+        f"{not args.no_optimize}"
+    )
+
+    print(
+        f"Adopt current index: "
+        f"{args.adopt_current_index}"
+    )
+
+    print(
+        f"Pipeline fingerprint: "
+        f"{current_manifest.fingerprint[:16]}..."
+    )
+
+
+    if args.rebuild:
+
+        run_rebuild(
+            args=(
+                args
+            ),
+            current_manifest=(
+                current_manifest
+            ),
+        )
+
+        return
+
+
+    run_incremental(
+        args
+    )
 
 
 if __name__ == "__main__":
