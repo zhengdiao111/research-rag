@@ -13,6 +13,10 @@ from research_rag.incremental_indexer import (
     sync_semantic_index,
 )
 
+from research_rag.index_manifest import (
+    build_current_index_manifest,
+)
+
 
 # =========================================================
 # CLI
@@ -69,6 +73,19 @@ def parse_arguments():
         action="store_true",
         help=(
             "Skip LanceDB post-write optimization."
+        ),
+    )
+
+
+    parser.add_argument(
+        "--adopt-current-index",
+        action="store_true",
+        help=(
+            "Initialize a missing index manifest using "
+            "the current pipeline configuration without "
+            "rebuilding the existing index. Use this only "
+            "for the one-time migration of an index that "
+            "you know was built using the current settings."
         ),
     )
 
@@ -156,6 +173,22 @@ def main():
     )
 
 
+    current_manifest = (
+        build_current_index_manifest()
+    )
+
+
+    print(
+        f"Adopt current index: "
+        f"{args.adopt_current_index}"
+    )
+
+    print(
+        f"Pipeline fingerprint: "
+        f"{current_manifest.fingerprint[:16]}..."
+    )
+
+
     print()
 
     print(
@@ -180,6 +213,10 @@ def main():
 
             optimize_after_write=(
                 not args.no_optimize
+            ),
+
+            adopt_missing_manifest=(
+                args.adopt_current_index
             ),
         )
     )

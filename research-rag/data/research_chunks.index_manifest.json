@@ -1,0 +1,32 @@
+{
+  "chunker_version": "research-chunker-v1",
+  "fingerprint": "61c475cc14d238745a534930a978be4e1390c4b2f9495045239503ac8ba213ea",
+  "manifest_format_version": 1,
+  "parser_version": "research-pdf-parser-v1",
+  "record_schema_version": 1,
+  "semantic_table_name": "research_chunks",
+  "settings": {
+    "allow_cross_page_chunks": false,
+    "chunk_max": 700,
+    "chunk_min": 180,
+    "chunk_overlap": 100,
+    "chunk_target": 550,
+    "embedding_model": "nomic-embed-text",
+    "ocr_language": "eng",
+    "searchable_chunk_types": [
+      "abstract",
+      "body",
+      "caption",
+      "conclusion",
+      "discussion",
+      "glossary",
+      "introduction",
+      "methods",
+      "results",
+      "sidebar",
+      "supplementary"
+    ],
+    "tokenizer_encoding": "cl100k_base",
+    "use_ocr": true
+  }
+}

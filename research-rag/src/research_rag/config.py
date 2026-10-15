@@ -78,6 +78,22 @@ PROCESSED_DIR.mkdir(
     exist_ok=True,
 )
 
+# ---------------------------------------------------------
+# Index pipeline versioning
+# ---------------------------------------------------------
+
+INDEX_MANIFEST_FORMAT_VERSION = 1
+
+INDEX_RECORD_SCHEMA_VERSION = 1
+
+PARSER_PIPELINE_VERSION = (
+    "research-pdf-parser-v1"
+)
+
+CHUNKER_PIPELINE_VERSION = (
+    "research-chunker-v1"
+)
+
 
 # ---------------------------------------------------------
 # PDF extraction
@@ -240,6 +256,13 @@ SEMANTIC_TABLE_NAME = os.getenv(
     "research_chunks",
 )
 
+INDEX_MANIFEST_PATH = (
+    DATA_DIR
+    / (
+        f"{SEMANTIC_TABLE_NAME}"
+        ".index_manifest.json"
+    )
+)
 
 SEMANTIC_TOP_K = int(
     os.getenv(
